@@ -4,21 +4,12 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:bytes"
+import "core:os"
+import "redis"
 
 main :: proc (){
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     fmt.eprintln("Logs from your program will appear here!")
 
-    listen_socket, listen_err := net.listen_tcp(net.Endpoint{
-        port = 6379,
-        address = net.IP4_Loopback
-    })
-    if listen_err != nil {
-        fmt.panicf("%s", listen_err)
-    }
-    client_socket, client_endpoint, accept_err := net.accept_tcp(listen_socket)
-    if accept_err != nil {
-        fmt.panicf("%s", accept_err)
-    }
+    redis.listen("127.0.0.1", 6379)
 }
-
