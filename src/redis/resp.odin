@@ -39,24 +39,6 @@ Buf_Slice :: struct {
 	start, end: int,
 }
 
-RESP_Buf_Slice_String :: struct {
-	value: Buf_Slice,
-}
-
-RESP_Buf_Slice_Error :: struct {
-	value: Buf_Slice,
-}
-
-RESP_Buf_Slice_Array :: struct {
-	value: [dynamic]Buf_Slice,
-}
-
-RESP_Buf_Slice :: union {
-	RESP_Buf_Slice_String,
-	RESP_Buf_Slice_Error,
-	RESP_Buf_Slice_Array,
-}
-
 Token :: union {
 	String_Token,
 	Error_Token,
@@ -67,20 +49,19 @@ Token :: union {
 }
 
 String_Token :: struct {
-	slice: Buf_Slice,
+	value: string,
 }
-
-Null_Bulk_String_Token :: distinct String_Token
-Error_Token :: distinct String_Token
 
 Int_Token :: struct {
 	value: i64,
 }
 
 Array_Token :: struct {
-	tokens: [dynamic]Token,
+	value: [dynamic]Token,
 }
 
+Error_Token :: distinct String_Token
+Null_Bulk_String_Token :: distinct String_Token
 Null_Array_Token :: distinct Array_Token
 
 parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
@@ -98,9 +79,11 @@ parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
 
 	#partial switch data_type {
 	case .Simple_String:
-		token = String_Token{slice}
+		str := strings.clone_from_bytes(buf[slice.start:slice.end])
+		token = String_Token{str}
 	case .Simple_Error:
-		token = Error_Token{slice}
+		str := strings.clone_from_bytes(buf[slice.start:slice.end])
+		token = Error_Token{str}
 	case .Integer:
 		s, clone_err := strings.clone_from_bytes(buf[slice.start:slice.end])
 		i, parse_ok := strconv.parse_i64(s)
@@ -113,7 +96,8 @@ parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
 			token = Null_Bulk_String_Token{}
 		} else {
 			slice, n, ok := word(buf, next_pos)
-			token = String_Token{slice}
+			str := strings.clone_from_bytes(buf[slice.start:slice.end])
+			token = String_Token{str}
 			next_pos = n
 		}
 	case .Array:
@@ -124,14 +108,14 @@ parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
 			token = Null_Bulk_String_Token{}
 		} else {
 			arr_token := Array_Token{}
-			arr_token.tokens = make(type_of(arr_token.tokens))
+			arr_token.value = make(type_of(arr_token.value))
 
 			for i := 0; i < count; i += 1 {
 				t, n, err := parse(buf, next_pos)
 				if err != .None {
 					return {}, -1, err
 				}
-				append(&arr_token.tokens, t)
+				append(&arr_token.value, t)
 				next_pos = n
 			}
 

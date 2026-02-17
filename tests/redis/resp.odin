@@ -34,7 +34,7 @@ test_parse_count :: proc(t: ^testing.T) {
 	c, next, err := redis.parse_count(buf.buf[:], pos)
 
 	testing.expect(t, c == 3)
-	testing.expect(t, next == 3)
+	testing.expect(t, next == 4)
 }
 
 @(test)
@@ -46,8 +46,7 @@ test_parse_token_simple_string :: proc(t: ^testing.T) {
 	#partial switch tok in token {
 	case redis.String_Token:
 		testing.expect(t, next == 8)
-		testing.expect(t, tok.slice.start == 1)
-		testing.expect(t, tok.slice.end == 6)
+		testing.expect(t, 0 == strings.compare(tok.value, "hello"))
 	}
 }
 
@@ -60,8 +59,7 @@ test_parse_token_simple_error :: proc(t: ^testing.T) {
 	#partial switch tok in token {
 	case redis.Error_Token:
 		testing.expect(t, next == 8)
-		testing.expect(t, tok.slice.start == 1)
-		testing.expect(t, tok.slice.end == 6)
+		testing.expect(t, 0 == strings.compare(tok.value, "error"))
 	}
 }
 
@@ -114,8 +112,7 @@ test_parse_token_bulk_string :: proc(t: ^testing.T) {
 		#partial switch tok in token {
 		case redis.String_Token:
 			testing.expect(t, next == len(buf))
-			testing.expect(t, tok.slice.start == 4)
-			testing.expect(t, tok.slice.end == 7)
+			testing.expect(t, 0 == strings.compare(tok.value, "foo"))
 		}
 	}
 
@@ -127,8 +124,7 @@ test_parse_token_bulk_string :: proc(t: ^testing.T) {
 		#partial switch tok in token {
 		case redis.Null_Bulk_String_Token:
 			testing.expect(t, next == len(buf))
-			testing.expect(t, tok.slice.start == 0)
-			testing.expect(t, tok.slice.end == 0)
+			testing.expect(t, len(tok.value) == 0)
 		}
 	}
 }
@@ -144,7 +140,7 @@ test_parse_token_array :: proc(t: ^testing.T) {
 
 		#partial switch tok in token {
 		case redis.Array_Token:
-			testing.expect(t, len(tok.tokens) == 2)
+			testing.expect(t, len(tok.value) == 2)
 		}
 	}
 
@@ -157,7 +153,7 @@ test_parse_token_array :: proc(t: ^testing.T) {
 
 		#partial switch tok in token {
 		case redis.Array_Token:
-			testing.expect(t, len(tok.tokens) == 0)
+			testing.expect(t, len(tok.value) == 0)
 		}
 	}
 
@@ -170,19 +166,19 @@ test_parse_token_array :: proc(t: ^testing.T) {
 
 		#partial switch tok in token {
 		case redis.Array_Token:
-			testing.expect(t, len(tok.tokens) == 3)
+			testing.expect(t, len(tok.value) == 3)
 
-			#partial switch v in tok.tokens[0] {
+			#partial switch v in tok.value[0] {
 			case redis.Int_Token:
 				testing.expect(t, v.value == 1)
 			}
 
-			#partial switch v in tok.tokens[1] {
+			#partial switch v in tok.value[1] {
 			case redis.Int_Token:
 				testing.expect(t, v.value == 2)
 			}
 
-			#partial switch v in tok.tokens[2] {
+			#partial switch v in tok.value[2] {
 			case redis.Int_Token:
 				testing.expect(t, v.value == 3)
 			}
@@ -198,7 +194,7 @@ test_parse_token_array :: proc(t: ^testing.T) {
 
 		#partial switch tok in token {
 		case redis.Null_Array_Token:
-			testing.expect(t, len(tok.tokens) == 0)
+			testing.expect(t, len(tok.value) == 0)
 		}
 	}
 }
