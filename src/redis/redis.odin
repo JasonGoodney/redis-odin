@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:thread"
 import "core:strings"
 
-listen :: proc(ip: string, port: int) {
+server :: proc(ip: string, port: int) {
 	local_addr, addr_ok := net.parse_ip4_address(ip)
  	if !addr_ok {
   		fmt.println("Failed to parse IP address")
