@@ -5,6 +5,12 @@ import "core:net"
 import "core:strings"
 import "core:thread"
 
+Redis :: struct {
+	kv: map[string]string,
+}
+
+redis := Redis{}
+
 server :: proc(ip: string, port: int) {
 	local_addr, addr_ok := net.parse_ip4_address(ip)
 	if !addr_ok {
@@ -59,23 +65,35 @@ handle_msg :: proc(sock: net.TCP_Socket) {
 
 		token, _, err := parse(received, 0)
 
-		response: string
-		if strings.contains(cmd, "PING") {
-			response = cmd_ping()
-		} else {
-			#partial switch tok in token {
-			case Array_Token:
-				#partial switch val in tok.value[0] {
-				case String_Token:
-					if 0 == strings.compare(val.value, "ECHO") {
-						response = cmd_echo(tok)
-					}
+		response := string{}
+		#partial switch tok in token {
+		case String_Token:
+			if 0 == strings.compare(tok.value, "PING") {
+				response = cmd_ping()
+			}
+		case Array_Token:
+			#partial switch cmd in tok.tokens[0] {
+			case String_Token:
+				if 0 == strings.compare(cmd.value, "PING") {
+					response = cmd_ping()
+				} else if 0 == strings.compare(cmd.value, "ECHO") {
+					response = cmd_echo(tok)
+				} else if 0 == strings.compare(cmd.value, "SET") {
+					res := cmd_set(tok)
+					fmt.println(res)
+					response = res
+				} else if 0 == strings.compare(cmd.value, "GET") {
+					response = cmd_get(tok)
 				}
-
 			}
 		}
 
+		if response == "" {
+			fmt.println("Response not set")
+			continue
+		}
 
+		fmt.printfln("Sending response: %s", response)
 		buffer := transmute([]u8)response
 		bytes_sent, err_send := net.send_tcp(sock, buffer)
 		if err_send != nil {
@@ -96,7 +114,7 @@ cmd_echo :: proc(token: Array_Token) -> string {
 	sb := strings.builder_make()
 	strings.write_rune(&sb, '$')
 
-	#partial switch val in token.value[1] {
+	#partial switch val in token.tokens[1] {
 	case String_Token:
 		strings.write_int(&sb, len(val.value))
 		strings.write_string(&sb, "\r\n")
@@ -105,7 +123,43 @@ cmd_echo :: proc(token: Array_Token) -> string {
 		return strings.to_string(sb)
 	}
 
-	return ""
+	return "$-1\r\n"
+}
+
+cmd_set :: proc(array: Array_Token) -> string {
+	if redis.kv == nil {
+		redis.kv = make(type_of(redis.kv))
+	}
+
+	key_tok := array.tokens[1].(String_Token)
+	val_tok := array.tokens[2].(String_Token)
+
+	redis.kv[key_tok.value] = val_tok.value
+
+	sb := strings.builder_make()
+	defer strings.builder_destroy(&sb)
+	strings.write_rune(&sb, '+')
+	strings.write_string(&sb, "OK")
+	strings.write_string(&sb, "\r\n")
+	return strings.clone(strings.to_string(sb))
+}
+
+cmd_get :: proc(array: Array_Token) -> string {
+	if redis.kv == nil {
+		return "$-1\r\n"
+	}
+
+	key_tok := array.tokens[1].(String_Token)
+	val := redis.kv[key_tok.value]
+
+	sb := strings.builder_make()
+	defer strings.builder_destroy(&sb)
+	strings.write_rune(&sb, '$')
+	strings.write_int(&sb, len(val))
+	strings.write_string(&sb, "\r\n")
+	strings.write_string(&sb, val)
+	strings.write_string(&sb, "\r\n")
+	return strings.clone(strings.to_string(sb))
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {

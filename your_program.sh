@@ -15,7 +15,7 @@ set -e # Exit early if any commands fail
 (
   cd "$(dirname "$0")" # Ensure compile steps are run within the repository directory
   mkdir -p /tmp/codecrafters-build-redis-odin
-  odin build src -out:/tmp/codecrafters-build-redis-odin/main
+  odin build src -debug -out:/tmp/codecrafters-build-redis-odin/main
 )
 
 # Copied from .codecrafters/run.sh

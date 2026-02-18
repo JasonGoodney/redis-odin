@@ -57,7 +57,7 @@ Int_Token :: struct {
 }
 
 Array_Token :: struct {
-	value: [dynamic]Token,
+	tokens: [dynamic]Token,
 }
 
 Error_Token :: distinct String_Token
@@ -108,14 +108,14 @@ parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
 			token = Null_Bulk_String_Token{}
 		} else {
 			arr_token := Array_Token{}
-			arr_token.value = make(type_of(arr_token.value))
+			arr_token.tokens = make(type_of(arr_token.tokens))
 
 			for i := 0; i < count; i += 1 {
 				t, n, err := parse(buf, next_pos)
 				if err != .None {
 					return {}, -1, err
 				}
-				append(&arr_token.value, t)
+				append(&arr_token.tokens, t)
 				next_pos = n
 			}
 

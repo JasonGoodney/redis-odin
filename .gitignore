@@ -1,3 +1,6 @@
+.zed
+tests/
+
 # User-specific files
 *.suo
 *.user
