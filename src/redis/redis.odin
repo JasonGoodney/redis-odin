@@ -2,16 +2,21 @@ package redis
 
 import "core:fmt"
 import "core:net"
+import "core:strconv"
 import "core:strings"
 import "core:thread"
 
-Redis :: struct {
-	kv: map[string]string,
+Set_Option :: union {
+	Set_Option_PX,
 }
 
-redis := Redis{}
+Set_Option_PX :: struct {
+	expire_milliseconds: i64,
+}
 
-server :: proc(ip: string, port: int) {
+connect :: proc(ip: string, port: int) {
+	cache_init()
+
 	local_addr, addr_ok := net.parse_ip4_address(ip)
 	if !addr_ok {
 		fmt.println("Failed to parse IP address")
@@ -43,10 +48,10 @@ server :: proc(ip: string, port: int) {
 	net.close(sock)
 }
 
-handle_msg :: proc(sock: net.TCP_Socket) {
+handle_msg :: proc(socket: net.TCP_Socket) {
 	buffer: [256]u8
 	for {
-		bytes_recv, err_recv := net.recv_tcp(sock, buffer[:])
+		bytes_recv, err_recv := net.recv_tcp(socket, buffer[:])
 		if err_recv != nil {
 			fmt.println("Failed to receive data")
 		}
@@ -61,105 +66,89 @@ handle_msg :: proc(sock: net.TCP_Socket) {
 
 		fmt.printfln("Server received [ %d bytes ]: %s", len(received), received)
 
-		cmd := strings.clone_from_bytes(received)
-
-		token, _, err := parse(received, 0)
+		str, err := decode(received)
+		array := str.(RESP_Array)
 
 		response := string{}
-		#partial switch tok in token {
-		case String_Token:
-			if 0 == strings.compare(tok.value, "PING") {
-				response = cmd_ping()
-			}
-		case Array_Token:
-			#partial switch cmd in tok.tokens[0] {
-			case String_Token:
-				if 0 == strings.compare(cmd.value, "PING") {
-					response = cmd_ping()
-				} else if 0 == strings.compare(cmd.value, "ECHO") {
-					response = cmd_echo(tok)
-				} else if 0 == strings.compare(cmd.value, "SET") {
-					res := cmd_set(tok)
-					fmt.println(res)
-					response = res
-				} else if 0 == strings.compare(cmd.value, "GET") {
-					response = cmd_get(tok)
-				}
-			}
+
+		cmd := array.elements[0].(RESP_Bulk_String)
+		if insensitive_compare(cmd.value, "PING") {
+			response = cmd_ping()
+		} else if insensitive_compare(cmd.value, "ECHO") {
+			response = cmd_echo(array)
+		} else if insensitive_compare(cmd.value, "SET") {
+			response = cmd_set(array)
+		} else if insensitive_compare(cmd.value, "GET") {
+			response = cmd_get(array)
 		}
 
-		if response == "" {
-			fmt.println("Response not set")
-			continue
-		}
+		assert(response != "")
 
-		fmt.printfln("Sending response: %s", response)
 		buffer := transmute([]u8)response
-		bytes_sent, err_send := net.send_tcp(sock, buffer)
+		bytes_sent, err_send := net.send_tcp(socket, buffer)
 		if err_send != nil {
 			fmt.println("Failed to send data")
 		}
 
 		sent := buffer[:bytes_sent]
-		fmt.printfln("Server send [ %d bytes ]: %s", len(sent), sent)
+		fmt.printfln("Server sent [ %d bytes ]: %s", len(sent), sent)
 	}
-	net.close(sock)
+
+	net.close(socket)
 }
 
 cmd_ping :: proc() -> string {
-	return "+PONG\r\n"
+	return encode(RESP_Simple_String{"PONG"})
 }
 
-cmd_echo :: proc(token: Array_Token) -> string {
-	sb := strings.builder_make()
-	strings.write_rune(&sb, '$')
-
-	#partial switch val in token.tokens[1] {
-	case String_Token:
-		strings.write_int(&sb, len(val.value))
-		strings.write_string(&sb, "\r\n")
-		strings.write_string(&sb, val.value)
-		strings.write_string(&sb, "\r\n")
-		return strings.to_string(sb)
-	}
-
-	return "$-1\r\n"
+cmd_echo :: proc(reply: RESP_Array) -> string {
+	return encode(reply.elements[1])
 }
 
-cmd_set :: proc(array: Array_Token) -> string {
-	if redis.kv == nil {
-		redis.kv = make(type_of(redis.kv))
+cmd_set :: proc(array: RESP_Array) -> string {
+	opts := make([dynamic]Set_Option)
+
+	key_tok := array.elements[1].(RESP_Bulk_String)
+	val_tok := array.elements[2].(RESP_Bulk_String)
+
+	i := 3
+	for i < len(array.elements) {
+		opt_tok := array.elements[i].(RESP_Bulk_String)
+		opt := strings.to_upper(opt_tok.value)
+		switch opt {
+		case "PX":
+			i += 1
+			if i > len(array.elements) {
+				continue
+			}
+			val_tok := array.elements[i].(RESP_Bulk_String)
+			expire, ok := strconv.parse_i64(val_tok.value)
+			if ok && expire > 0 {
+				append(&opts, Set_Option_PX{expire})
+			}
+		case:
+			break
+		}
+
+		i += 1
 	}
 
-	key_tok := array.tokens[1].(String_Token)
-	val_tok := array.tokens[2].(String_Token)
+	ok := cache_set(key_tok.value, val_tok.value, opts[:])
+	if !ok {
+		return encode(RESP_Simple_Error{"ERROR"})
+	}
 
-	redis.kv[key_tok.value] = val_tok.value
-
-	sb := strings.builder_make()
-	defer strings.builder_destroy(&sb)
-	strings.write_rune(&sb, '+')
-	strings.write_string(&sb, "OK")
-	strings.write_string(&sb, "\r\n")
-	return strings.clone(strings.to_string(sb))
+	return encode(RESP_Simple_String{"OK"})
 }
 
-cmd_get :: proc(array: Array_Token) -> string {
-	if redis.kv == nil {
-		return "$-1\r\n"
+cmd_get :: proc(array: RESP_Array) -> string {
+	key_tok := array.elements[1].(RESP_Bulk_String)
+	val, ok := cache_get(key_tok.value)
+	if !ok {
+		return encode(RESP_Null_Bulk_String{})
 	}
 
-	key_tok := array.tokens[1].(String_Token)
-	val := redis.kv[key_tok.value]
-
-	sb := strings.builder_make()
-	defer strings.builder_destroy(&sb)
-	strings.write_rune(&sb, '$')
-	strings.write_int(&sb, len(val))
-	strings.write_string(&sb, "\r\n")
-	strings.write_string(&sb, val)
-	strings.write_string(&sb, "\r\n")
-	return strings.clone(strings.to_string(sb))
+	return encode(RESP_Bulk_String{val})
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
@@ -183,4 +172,8 @@ is_telnet_ctrl_c :: proc(bytes: []u8) -> bool {
 				bytes[3] == 253 &&
 				bytes[4] == 6) \
 	)
+}
+
+insensitive_compare :: proc(lhs: string, rhs: string) -> bool {
+	return 0 == strings.compare(strings.to_lower(lhs), strings.to_lower(rhs))
 }

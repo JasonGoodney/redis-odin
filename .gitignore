@@ -1,5 +1,6 @@
 .zed
 tests/
+debug*
 
 # User-specific files
 *.suo

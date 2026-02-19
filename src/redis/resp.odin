@@ -1,7 +1,7 @@
 package redis
 
 import "core:bytes"
-import "core:slice"
+import "core:fmt"
 import "core:strconv"
 import "core:strings"
 
@@ -39,32 +39,88 @@ Buf_Slice :: struct {
 	start, end: int,
 }
 
-Token :: union {
-	String_Token,
-	Error_Token,
-	Int_Token,
-	Array_Token,
-	Null_Bulk_String_Token,
-	Null_Array_Token,
+RESP_Type :: union {
+	RESP_Simple_String,
+	RESP_Simple_Error,
+	RESP_Integer,
+	RESP_Bulk_String,
+	RESP_Array,
+	RESP_Null_Bulk_String,
+	RESP_Null_Array,
 }
 
-String_Token :: struct {
+RESP_Simple_String :: struct {
 	value: string,
 }
 
-Int_Token :: struct {
+RESP_Integer :: struct {
 	value: i64,
 }
 
-Array_Token :: struct {
-	tokens: [dynamic]Token,
+RESP_Array :: struct {
+	elements: [dynamic]RESP_Type,
 }
 
-Error_Token :: distinct String_Token
-Null_Bulk_String_Token :: distinct String_Token
-Null_Array_Token :: distinct Array_Token
+RESP_Simple_Error :: distinct RESP_Simple_String
+RESP_Bulk_String :: distinct RESP_Simple_String
+RESP_Null_Bulk_String :: distinct RESP_Simple_String
+RESP_Null_Array :: distinct RESP_Array
 
-parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
+decode :: proc(buf: []byte) -> (RESP_Type, RESP_Error) {
+	data, _, err := parse(buf, 0)
+	if err != nil {
+		return {}, err
+	}
+	return data, .None
+}
+
+encode :: proc(type: RESP_Type) -> (str: string, ok: bool) #optional_ok {
+	sb := strings.builder_make()
+	defer strings.builder_destroy(&sb)
+
+	switch t in type {
+	case RESP_Simple_String:
+		strings.write_rune(&sb, '+')
+		strings.write_string(&sb, t.value)
+		strings.write_string(&sb, "\r\n")
+	case RESP_Simple_Error:
+		strings.write_rune(&sb, '-')
+		strings.write_string(&sb, t.value)
+		strings.write_string(&sb, "\r\n")
+	case RESP_Integer:
+		strings.write_rune(&sb, ':')
+		strings.write_i64(&sb, t.value)
+		strings.write_string(&sb, "\r\n")
+	case RESP_Bulk_String:
+		strings.write_rune(&sb, '$')
+		strings.write_int(&sb, len(t.value))
+		strings.write_string(&sb, "\r\n")
+		strings.write_string(&sb, t.value)
+		strings.write_string(&sb, "\r\n")
+	case RESP_Array:
+		strings.write_rune(&sb, '*')
+		strings.write_int(&sb, len(t.elements))
+		strings.write_string(&sb, "\r\n")
+		for e in t.elements {
+			str, ok := encode(e)
+			strings.write_string(&sb, str)
+		}
+	case RESP_Null_Bulk_String:
+		strings.write_rune(&sb, '$')
+		strings.write_int(&sb, -1)
+		strings.write_string(&sb, "\r\n")
+	case RESP_Null_Array:
+		strings.write_rune(&sb, '*')
+		strings.write_int(&sb, -1)
+		strings.write_string(&sb, "\r\n")
+	}
+
+	str = strings.clone(strings.to_string(sb))
+	fmt.printfln("encoding: %s", str)
+	return str, ok
+}
+
+parse :: proc(buf: []byte, pos: int) -> (RESP_Type, int, RESP_Error) {
 	if pos >= len(buf) {
 		return {}, -1, .None
 	}
@@ -75,29 +131,29 @@ parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
 		return {}, pos, .Unexpected_End
 	}
 
-	token: Token
+	token: RESP_Type
 
 	#partial switch data_type {
 	case .Simple_String:
 		str := strings.clone_from_bytes(buf[slice.start:slice.end])
-		token = String_Token{str}
+		token = RESP_Simple_String{str}
 	case .Simple_Error:
 		str := strings.clone_from_bytes(buf[slice.start:slice.end])
-		token = Error_Token{str}
+		token = RESP_Simple_Error{str}
 	case .Integer:
 		s, clone_err := strings.clone_from_bytes(buf[slice.start:slice.end])
 		i, parse_ok := strconv.parse_i64(s)
-		token = Int_Token{i}
+		token = RESP_Integer{i}
 	case .Bulk_String:
 		s, clone_err := strings.clone_from_bytes(buf[slice.start:slice.end])
 		count, parse_ok := strconv.parse_int(s)
 		if count == -1 {
 			_, next_pos, _ = word(buf, next_pos)
-			token = Null_Bulk_String_Token{}
+			token = RESP_Null_Bulk_String{}
 		} else {
 			slice, n, ok := word(buf, next_pos)
 			str := strings.clone_from_bytes(buf[slice.start:slice.end])
-			token = String_Token{str}
+			token = RESP_Bulk_String{str}
 			next_pos = n
 		}
 	case .Array:
@@ -105,17 +161,17 @@ parse :: proc(buf: []byte, pos: int) -> (Token, int, RESP_Error) {
 		count, parse_ok := strconv.parse_int(s)
 		if count == -1 {
 			_, next_pos, _ = word(buf, next_pos)
-			token = Null_Bulk_String_Token{}
+			token = RESP_Null_Bulk_String{}
 		} else {
-			arr_token := Array_Token{}
-			arr_token.tokens = make(type_of(arr_token.tokens))
+			arr_token := RESP_Array{}
+			arr_token.elements = make(type_of(arr_token.elements))
 
 			for i := 0; i < count; i += 1 {
 				t, n, err := parse(buf, next_pos)
 				if err != .None {
 					return {}, -1, err
 				}
-				append(&arr_token.tokens, t)
+				append(&arr_token.elements, t)
 				next_pos = n
 			}
 
@@ -142,24 +198,6 @@ word :: proc(buf: []byte, pos: int) -> (Buf_Slice, int, bool) {
 	return slice, next_pos, true
 }
 
-// parse_simple_string :: proc(buf: []byte, pos: int) -> (RESP_Buf_Slice_String, int, RESP_Error) {
-// 	w, next, ok := word(buf, pos)
-// 	if !ok {
-// 		return {}, pos, .Unexpected_End
-// 	}
-
-// 	return {w}, next, .None
-// }
-
-// parse_simple_error :: proc(buf: []byte, pos: int) -> (RESP_Buf_Slice_Error, int, RESP_Error) {
-// 	w, next, ok := word(buf, pos)
-// 	if !ok {
-// 		return {}, pos, .Unexpected_End
-// 	}
-
-// 	return {w}, next, .None
-// }
-
 parse_count :: proc(buf: []byte, pos: int) -> (int, int, RESP_Error) {
 	w, next, ok := word(buf, pos)
 	if !ok {
@@ -171,61 +209,6 @@ parse_count :: proc(buf: []byte, pos: int) -> (int, int, RESP_Error) {
 
 	return count, next, .None
 }
-
-// parse_integer :: proc(buf: []byte, pos: int) -> (i64, int, RESP_Error) {
-// 	i, next, ok := parse_count(buf, pos)
-// 	return i64(i), next, .None
-// }
-
-// parse_bulk_string :: proc(
-// 	buf: []byte,
-// 	pos: int,
-// ) -> (
-// 	RESP_Buf_Slice_String,
-// 	bool,
-// 	int,
-// 	RESP_Error,
-// ) {
-// 	count, next, err := parse_count(buf, pos)
-// 	if count == -1 {
-// 		n, _ := next_crlf(buf, next)
-// 		return {}, true, n, .None
-// 	}
-
-// 	w, n, ok := word(buf, next)
-// 	if !ok {
-// 		return {}, false, pos, .Unexpected_End
-// 	}
-
-
-// 	return {w}, false, n, .None
-// }
-
-// parse_array :: proc(buf: []byte, pos: int) -> (RESP_Buf_Slice_Array, int, RESP_Error) {
-// 	count, next, err := parse_count(buf, pos)
-// 	if count == -1 {
-// 		n, _ := next_crlf(buf, next)
-// 		return {}, n, .None
-// 	}
-
-// 	result := RESP_Buf_Slice_Array{}
-// 	result.value = make(type_of(result.value), count)
-
-// 	slice: Buf_Slice
-// 	ok: bool
-// 	for i := 0; i < count; i += 1 {
-// 		prev := next
-// 		slice, next, ok := word(buf, next)
-// 		if !ok {
-// 			return {}, prev, .Bad_Array_Size
-// 		}
-
-// 		append(&result.value, slice)
-// 	}
-
-
-// 	return result, next, .None
-// }
 
 next_crlf :: proc(buf: []byte, from_pos: int) -> (int, bool) {
 	for i := from_pos; i < len(buf); i += 1 {
