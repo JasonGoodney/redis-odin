@@ -2,6 +2,7 @@
 
 package redis
 
+import "core:container/intrusive/list"
 import "core:fmt"
 import "core:net"
 import "core:strconv"
@@ -202,27 +203,30 @@ rpush :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 	assert(argc - 1 >= RPUSH.min_args)
 
 	key := (resp.elements[1].(RESP_Bulk_String)).value
-	value_count := argc - 2
+	values_count := argc - 2
 
-	values := make([dynamic]string, value_count)
-	defer delete(values)
+	list_obj: List_Cachable
 
 	if existing_obj, peek_ok := database_peek(&database, key); peek_ok {
-		elements := (existing_obj.(List_Cachable)).elements
-		append_elems(&values, ..elements)
+		list_obj = existing_obj.(List_Cachable)
+	} else {
+		list_obj = List_Cachable{}
 	}
 
-	for i := 3; i < argc; i += 1 {
-		append(&values, (resp.elements[i].(RESP_Bulk_String)).value)
+	for i := 2; i < argc; i += 1 {
+		value := (resp.elements[i].(RESP_Bulk_String)).value
+		str_obj := String_Cachable{}
+		str_obj.value = value
+		list.push_back(&list_obj.elements, &str_obj.node)
+		list_obj.count += 1
 	}
 
-	obj := List_Cachable{values[:]}
-	set_ok := database_set(&database, key, obj)
+	set_ok := database_set(&database, key, list_obj)
 	if !set_ok {
 		return {}, false
 	}
 
-	return RESP_Integer{i64(len(values))}, true
+	return RESP_Integer{list_obj.count}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {

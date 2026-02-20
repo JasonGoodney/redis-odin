@@ -1,5 +1,6 @@
 package redis
 
+import "core:container/intrusive/list"
 import "core:container/lru"
 import "core:fmt"
 import "core:time"
@@ -14,12 +15,14 @@ Cachable :: union {
 }
 
 String_Cachable :: struct {
+	using node: list.Node,
 	value:      string,
 	expires_at: time.Time,
 }
 
 List_Cachable :: struct {
-	elements: []string,
+	count:    i64,
+	elements: list.List,
 }
 
 database_init :: proc(capacity: int = 1000, allocator := context.allocator) -> Database {
@@ -36,7 +39,7 @@ database_destroy :: proc(db: ^Database) {
 
 database_set :: proc(db: ^Database, key: string, value: Cachable) -> (ok: bool) {
 	assert(db.cache.capacity > 0)
-	fmt.printfln("Setting %s for %s", value, key)
+
 	err := lru.set(db.cache, key, value)
 	if err != nil {
 		fmt.printfln("Failed to set %s for %s: %s", value, key, err)
