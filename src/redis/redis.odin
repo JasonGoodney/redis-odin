@@ -127,7 +127,6 @@ commands := map[string]Command {
 }
 
 ping :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
-	// assert(len(resp.elements) - 1 == PING.min_args)
 	if len(resp.elements) - 1 == 1 {
 		return echo(db, resp)
 	}
@@ -223,7 +222,7 @@ rpush :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 		return {}, false
 	}
 
-	return RESP_Integer{i64(value_count)}, true
+	return RESP_Integer{i64(len(values))}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
