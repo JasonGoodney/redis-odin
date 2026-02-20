@@ -44,6 +44,10 @@ database_set :: proc(db: ^Database, key: string, value: Cachable) -> (ok: bool) 
 	return err == nil
 }
 
+database_peek :: proc(db: ^Database, key: string) -> (value: Cachable, ok: bool) {
+	return lru.peek(db.cache, key)
+}
+
 database_get :: proc(db: ^Database, key: string) -> (value: Cachable, ok: bool) {
 	return lru.get(db.cache, key)
 }

@@ -14,39 +14,7 @@ Client :: struct {
 	database: ^Database,
 }
 
-Command :: struct {
-	name:     string,
-	min_args: int,
-	handler:  proc(db: Database, resp: RESP_Array) -> (RESP, bool),
-}
-
 database: Database
-
-PING :: Command{"PING", 0, ping}
-ECHO :: Command{"ECHO", 1, echo}
-SET :: Command{"SET", 2, set}
-GET :: Command{"GET", 1, get}
-
-commands := map[string]Command {
-	PING.name = PING,
-	ECHO.name = ECHO,
-	SET.name  = SET,
-	GET.name  = GET,
-}
-
-Commands :: union {
-	String_Commands,
-}
-
-String_Commands :: struct {}
-
-Set_Option :: union {
-	Set_Option_PX,
-}
-
-Set_Option_PX :: struct {
-	expire_milliseconds: i64,
-}
 
 connect :: proc(ip: string, port: int) {
 	local_addr, addr_ok := net.parse_ip4_address(ip)
@@ -116,7 +84,7 @@ handle_msg :: proc(client: net.TCP_Socket) {
 		cmd := commands[strings.to_upper(name)]
 		res_resp, cmd_ok := cmd.handler(database, resp)
 
-		response := string{}
+		response: string
 		if !cmd_ok {
 			response = encode(RESP_Simple_Error{"ERROR"})
 		} else {
@@ -138,6 +106,26 @@ handle_msg :: proc(client: net.TCP_Socket) {
 	net.close(client)
 }
 
+Command :: struct {
+	name:     string,
+	min_args: int,
+	handler:  proc(db: Database, resp: RESP_Array) -> (RESP, bool),
+}
+
+PING :: Command{"PING", 0, ping}
+ECHO :: Command{"ECHO", 1, echo}
+SET :: Command{"SET", 2, set}
+GET :: Command{"GET", 1, get}
+RPUSH :: Command{"RPUSH", 2, rpush}
+
+commands := map[string]Command {
+	PING.name  = PING,
+	ECHO.name  = ECHO,
+	SET.name   = SET,
+	GET.name   = GET,
+	RPUSH.name = RPUSH,
+}
+
 ping :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 	// assert(len(resp.elements) - 1 == PING.min_args)
 	if len(resp.elements) - 1 == 1 {
@@ -155,18 +143,14 @@ set :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 	elem_count := len(resp.elements)
 	assert(elem_count - 1 >= SET.min_args)
 
-
-	opts := make([dynamic]Set_Option)
-
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 	val := (resp.elements[2].(RESP_Bulk_String)).value
 
-	cachable := String_Cachable {
+	obj := String_Cachable {
 		value = val,
 	}
 
-	i := 3
-	for i < elem_count {
+	for i := 3; i < elem_count; i += 1 {
 		opt := resp.elements[i].(RESP_Bulk_String)
 		opt_key := strings.to_upper(opt.value)
 		switch opt_key {
@@ -179,18 +163,16 @@ set :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 			ms, ok := strconv.parse_i64(opt_val.value)
 			if ok && ms > 0 {
 				expires_at := time.time_add(time.now(), time.Duration(ms * 1e6))
-				cachable.expires_at = expires_at
+				obj.expires_at = expires_at
 			}
 		case:
 			break
 		}
-
-		i += 1
 	}
 
-	set_ok := database_set(&database, key, cachable)
+	set_ok := database_set(&database, key, obj)
 	if !set_ok {
-		return RESP_Simple_Error{"ERROR"}, true
+		return {}, false
 	}
 
 	return RESP_Simple_String{"OK"}, true
@@ -214,6 +196,34 @@ get :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 	}
 
 	return RESP_Bulk_String{str.value}, true
+}
+
+rpush :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
+	argc := len(resp.elements)
+	assert(argc - 1 >= RPUSH.min_args)
+
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+	value_count := argc - 2
+
+	values := make([dynamic]string, value_count)
+	defer delete(values)
+
+	if existing_obj, peek_ok := database_peek(&database, key); peek_ok {
+		elements := (existing_obj.(List_Cachable)).elements
+		append_elems(&values, ..elements)
+	}
+
+	for i := 3; i < argc; i += 1 {
+		append(&values, (resp.elements[i].(RESP_Bulk_String)).value)
+	}
+
+	obj := List_Cachable{values[:]}
+	set_ok := database_set(&database, key, obj)
+	if !set_ok {
+		return {}, false
+	}
+
+	return RESP_Integer{i64(value_count)}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
