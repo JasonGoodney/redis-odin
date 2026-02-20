@@ -39,7 +39,7 @@ Buf_Slice :: struct {
 	start, end: int,
 }
 
-RESP_Type :: union {
+RESP :: union {
 	RESP_Simple_String,
 	RESP_Simple_Error,
 	RESP_Integer,
@@ -58,15 +58,15 @@ RESP_Integer :: struct {
 }
 
 RESP_Array :: struct {
-	elements: [dynamic]RESP_Type,
+	elements: [dynamic]RESP,
 }
 
 RESP_Simple_Error :: distinct RESP_Simple_String
 RESP_Bulk_String :: distinct RESP_Simple_String
-RESP_Null_Bulk_String :: distinct RESP_Simple_String
-RESP_Null_Array :: distinct RESP_Array
+RESP_Null_Bulk_String :: struct {}
+RESP_Null_Array :: struct {}
 
-decode :: proc(buf: []byte) -> (RESP_Type, RESP_Error) {
+decode :: proc(buf: []byte) -> (RESP, RESP_Error) {
 	data, _, err := parse(buf, 0)
 	if err != nil {
 		return {}, err
@@ -74,7 +74,7 @@ decode :: proc(buf: []byte) -> (RESP_Type, RESP_Error) {
 	return data, .None
 }
 
-encode :: proc(type: RESP_Type) -> (str: string, ok: bool) #optional_ok {
+encode :: proc(type: RESP) -> (str: string, ok: bool) #optional_ok {
 	sb := strings.builder_make()
 	defer strings.builder_destroy(&sb)
 
@@ -116,11 +116,10 @@ encode :: proc(type: RESP_Type) -> (str: string, ok: bool) #optional_ok {
 	}
 
 	str = strings.clone(strings.to_string(sb))
-	fmt.printfln("encoding: %s", str)
 	return str, ok
 }
 
-parse :: proc(buf: []byte, pos: int) -> (RESP_Type, int, RESP_Error) {
+parse :: proc(buf: []byte, pos: int) -> (RESP, int, RESP_Error) {
 	if pos >= len(buf) {
 		return {}, -1, .None
 	}
@@ -131,7 +130,7 @@ parse :: proc(buf: []byte, pos: int) -> (RESP_Type, int, RESP_Error) {
 		return {}, pos, .Unexpected_End
 	}
 
-	token: RESP_Type
+	token: RESP
 
 	#partial switch data_type {
 	case .Simple_String:

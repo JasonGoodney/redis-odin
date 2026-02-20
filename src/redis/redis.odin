@@ -1,3 +1,5 @@
+#+feature dynamic-literals
+
 package redis
 
 import "core:fmt"
@@ -5,6 +7,38 @@ import "core:net"
 import "core:strconv"
 import "core:strings"
 import "core:thread"
+import "core:time"
+
+Client :: struct {
+	socket:   net.TCP_Socket,
+	database: ^Database,
+}
+
+Command :: struct {
+	name:     string,
+	min_args: int,
+	handler:  proc(db: Database, resp: RESP_Array) -> (RESP, bool),
+}
+
+database: Database
+
+PING :: Command{"PING", 0, ping}
+ECHO :: Command{"ECHO", 1, echo}
+SET :: Command{"SET", 2, set}
+GET :: Command{"GET", 1, get}
+
+commands := map[string]Command {
+	PING.name = PING,
+	ECHO.name = ECHO,
+	SET.name  = SET,
+	GET.name  = GET,
+}
+
+Commands :: union {
+	String_Commands,
+}
+
+String_Commands :: struct {}
 
 Set_Option :: union {
 	Set_Option_PX,
@@ -15,8 +49,6 @@ Set_Option_PX :: struct {
 }
 
 connect :: proc(ip: string, port: int) {
-	cache_init()
-
 	local_addr, addr_ok := net.parse_ip4_address(ip)
 	if !addr_ok {
 		fmt.println("Failed to parse IP address")
@@ -30,15 +62,25 @@ connect :: proc(ip: string, port: int) {
 
 	sock, err := net.listen_tcp(endpoint)
 	if err != nil {
-		fmt.println("Failed to listen on TCP")
+		fmt.println("Failed to listen on TCP", err)
 		return
 	}
 
+	database = database_init(allocator = context.allocator)
+
 	fmt.printfln("Listening on TCP: %s", net.endpoint_to_string(endpoint))
+
+	retry := 1
+	max_retries := 5
 	for {
 		cli, _, err_accept := net.accept_tcp(sock)
+
 		if err_accept != nil {
 			fmt.println("Failed to accept TCP connection")
+			retry += 1
+			if retry > max_retries {
+				break
+			}
 			continue
 		}
 
@@ -48,12 +90,13 @@ connect :: proc(ip: string, port: int) {
 	net.close(sock)
 }
 
-handle_msg :: proc(socket: net.TCP_Socket) {
+handle_msg :: proc(client: net.TCP_Socket) {
 	buffer: [256]u8
 	for {
-		bytes_recv, err_recv := net.recv_tcp(socket, buffer[:])
+		bytes_recv, err_recv := net.recv_tcp(client, buffer[:])
 		if err_recv != nil {
-			fmt.println("Failed to receive data")
+			fmt.println("Failed to receive data", err_recv)
+			break
 		}
 		received := buffer[:bytes_recv]
 		if len(received) == 0 ||
@@ -66,26 +109,24 @@ handle_msg :: proc(socket: net.TCP_Socket) {
 
 		fmt.printfln("Server received [ %d bytes ]: %s", len(received), received)
 
-		str, err := decode(received)
-		array := str.(RESP_Array)
+		decoded, err := decode(received)
+		resp := decoded.(RESP_Array)
+
+		name := (resp.elements[0].(RESP_Bulk_String)).value
+		cmd := commands[strings.to_upper(name)]
+		res_resp, cmd_ok := cmd.handler(database, resp)
 
 		response := string{}
-
-		cmd := array.elements[0].(RESP_Bulk_String)
-		if insensitive_compare(cmd.value, "PING") {
-			response = cmd_ping()
-		} else if insensitive_compare(cmd.value, "ECHO") {
-			response = cmd_echo(array)
-		} else if insensitive_compare(cmd.value, "SET") {
-			response = cmd_set(array)
-		} else if insensitive_compare(cmd.value, "GET") {
-			response = cmd_get(array)
+		if !cmd_ok {
+			response = encode(RESP_Simple_Error{"ERROR"})
+		} else {
+			response = encode(res_resp)
 		}
 
 		assert(response != "")
 
 		buffer := transmute([]u8)response
-		bytes_sent, err_send := net.send_tcp(socket, buffer)
+		bytes_sent, err_send := net.send_tcp(client, buffer)
 		if err_send != nil {
 			fmt.println("Failed to send data")
 		}
@@ -94,37 +135,51 @@ handle_msg :: proc(socket: net.TCP_Socket) {
 		fmt.printfln("Server sent [ %d bytes ]: %s", len(sent), sent)
 	}
 
-	net.close(socket)
+	net.close(client)
 }
 
-cmd_ping :: proc() -> string {
-	return encode(RESP_Simple_String{"PONG"})
+ping :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
+	// assert(len(resp.elements) - 1 == PING.min_args)
+	if len(resp.elements) - 1 == 1 {
+		return echo(db, resp)
+	}
+	return RESP_Simple_String{"PONG"}, true
 }
 
-cmd_echo :: proc(reply: RESP_Array) -> string {
-	return encode(reply.elements[1])
+echo :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
+	assert(len(resp.elements) - 1 == ECHO.min_args)
+	return resp.elements[1], true
 }
 
-cmd_set :: proc(array: RESP_Array) -> string {
+set :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
+	elem_count := len(resp.elements)
+	assert(elem_count - 1 >= SET.min_args)
+
+
 	opts := make([dynamic]Set_Option)
 
-	key_tok := array.elements[1].(RESP_Bulk_String)
-	val_tok := array.elements[2].(RESP_Bulk_String)
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+	val := (resp.elements[2].(RESP_Bulk_String)).value
+
+	cachable := String_Cachable {
+		value = val,
+	}
 
 	i := 3
-	for i < len(array.elements) {
-		opt_tok := array.elements[i].(RESP_Bulk_String)
-		opt := strings.to_upper(opt_tok.value)
-		switch opt {
+	for i < elem_count {
+		opt := resp.elements[i].(RESP_Bulk_String)
+		opt_key := strings.to_upper(opt.value)
+		switch opt_key {
 		case "PX":
 			i += 1
-			if i > len(array.elements) {
+			if i > elem_count {
 				continue
 			}
-			val_tok := array.elements[i].(RESP_Bulk_String)
-			expire, ok := strconv.parse_i64(val_tok.value)
-			if ok && expire > 0 {
-				append(&opts, Set_Option_PX{expire})
+			opt_val := resp.elements[i].(RESP_Bulk_String)
+			ms, ok := strconv.parse_i64(opt_val.value)
+			if ok && ms > 0 {
+				expires_at := time.time_add(time.now(), time.Duration(ms * 1e6))
+				cachable.expires_at = expires_at
 			}
 		case:
 			break
@@ -133,22 +188,32 @@ cmd_set :: proc(array: RESP_Array) -> string {
 		i += 1
 	}
 
-	ok := cache_set(key_tok.value, val_tok.value, opts[:])
-	if !ok {
-		return encode(RESP_Simple_Error{"ERROR"})
+	set_ok := database_set(&database, key, cachable)
+	if !set_ok {
+		return RESP_Simple_Error{"ERROR"}, true
 	}
 
-	return encode(RESP_Simple_String{"OK"})
+	return RESP_Simple_String{"OK"}, true
 }
 
-cmd_get :: proc(array: RESP_Array) -> string {
-	key_tok := array.elements[1].(RESP_Bulk_String)
-	val, ok := cache_get(key_tok.value)
-	if !ok {
-		return encode(RESP_Null_Bulk_String{})
+get :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
+	assert(len(resp.elements) - 1 == GET.min_args)
+
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+	val, get_ok := database_get(&database, key)
+	if !get_ok {
+		fmt.printfln("Item not found for %s", key)
+		return {}, false
 	}
 
-	return encode(RESP_Bulk_String{val})
+	str := val.(String_Cachable)
+	if str.expires_at != {} && time.diff(time.now(), str.expires_at) < 0 {
+		fmt.printfln("Item expired for %s", key)
+		database_remove(&database, key)
+		return RESP_Null_Bulk_String{}, true
+	}
+
+	return RESP_Bulk_String{str.value}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
