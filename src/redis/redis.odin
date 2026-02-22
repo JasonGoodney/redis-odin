@@ -205,6 +205,21 @@ get :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 }
 
 rpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	return push(db, resp, list_append)
+}
+
+lpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	return push(db, resp, list_prepend)
+}
+
+push :: proc(
+	db: ^Database,
+	resp: RESP_Array,
+	push_proc: proc(list: ^List, value: string),
+) -> (
+	RESP,
+	bool,
+) {
 	argc := len(resp.elements)
 	assert(argc >= RPUSH.min_args)
 
@@ -221,7 +236,7 @@ rpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 
 	for i := 2; i < argc; i += 1 {
 		value := (resp.elements[i].(RESP_Bulk_String)).value
-		list_append(&list_obj, value)
+		push_proc(&list_obj, value)
 	}
 
 	set_ok := database_set(&database, key, list_obj)
@@ -288,34 +303,6 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	}
 
 	return RESP_Array{values}, true
-}
-
-lpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
-	argc := len(resp.elements)
-	assert(argc >= RPUSH.min_args)
-
-	key := (resp.elements[1].(RESP_Bulk_String)).value
-	values_count := argc - 2
-
-	list_obj: List
-
-	if existing_obj, peek_ok := database_peek(&database, key); peek_ok {
-		list_obj = existing_obj.(List)
-	} else {
-		list_obj = list_init()
-	}
-
-	for i := 2; i < argc; i += 1 {
-		value := (resp.elements[i].(RESP_Bulk_String)).value
-		list_prepend(&list_obj, value)
-	}
-
-	set_ok := database_set(&database, key, list_obj)
-	if !set_ok {
-		return {}, false
-	}
-
-	return RESP_Integer{i64(list_obj.len)}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
