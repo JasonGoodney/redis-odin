@@ -120,8 +120,9 @@ ECHO :: Command{"ECHO", 2, echo}
 SET :: Command{"SET", 3, set}
 GET :: Command{"GET", 2, get}
 RPUSH :: Command{"RPUSH", 3, rpush}
-LRANGE :: Command{"LRANGE", 4, lrange}
 LPUSH :: Command{"LPUSH", 3, lpush}
+LRANGE :: Command{"LRANGE", 4, lrange}
+LLEN :: Command{"LLEN", 2, llen}
 
 commands := map[string]Command {
 	PING.name   = PING,
@@ -129,8 +130,9 @@ commands := map[string]Command {
 	SET.name    = SET,
 	GET.name    = GET,
 	RPUSH.name  = RPUSH,
-	LRANGE.name = LRANGE,
 	LPUSH.name  = LPUSH,
+	LRANGE.name = LRANGE,
+	LLEN.name   = LLEN,
 }
 
 ping :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
@@ -303,6 +305,25 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	}
 
 	return RESP_Array{values}, true
+}
+
+llen :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	argc := len(resp.elements)
+	assert(argc == LLEN.min_args)
+
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+
+	obj, get_ok := database_get(db, key)
+	if !get_ok {
+		return RESP_Integer{0}, true
+	}
+
+	list, cast_ok := obj.(List)
+	if !cast_ok {
+		return RESP_Simple_Error{"Not a list"}, true
+	}
+
+	return RESP_Integer{i64(list.len)}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
