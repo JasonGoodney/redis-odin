@@ -4,6 +4,7 @@ package redis
 
 import "core:container/intrusive/list"
 import "core:fmt"
+import "core:math"
 import "core:net"
 import "core:strconv"
 import "core:strings"
@@ -246,15 +247,29 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 
 	list_obj := obj.(List_Cachable)
 	elem_count := len(list_obj.elements)
+
 	if start > elem_count {
 		return RESP_Array{}, true
 	}
+	if math.abs(start) > elem_count {
+		start = 0
+	}
+	if start < 0 {
+		start = elem_count + start
+	}
+
 	if stop > elem_count {
-		stop = elem_count-1
+		stop = elem_count - 1
+	}
+	if math.abs(stop) > elem_count {
+		stop = 0
+	}
+	if stop < 0 {
+		stop = elem_count + stop
 	}
 
 	values := make([dynamic]RESP)
-//	defer delete(values)
+	//	defer delete(values)
 	for i := start; i <= stop; i += 1 {
 		elem := list_obj.elements[i]
 		append(&values, RESP_Bulk_String{elem})
