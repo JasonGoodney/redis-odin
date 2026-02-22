@@ -83,7 +83,7 @@ handle_msg :: proc(client: net.TCP_Socket) {
 
 		name := (resp.elements[0].(RESP_Bulk_String)).value
 		cmd := commands[strings.to_upper(name)]
-		res_resp, cmd_ok := cmd.handler(database, resp)
+		res_resp, cmd_ok := cmd.handler(&database, resp)
 
 		response: string
 		if !cmd_ok {
@@ -107,41 +107,44 @@ handle_msg :: proc(client: net.TCP_Socket) {
 	net.close(client)
 }
 
+Command_Handler :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool)
 Command :: struct {
 	name:     string,
 	min_args: int,
-	handler:  proc(db: Database, resp: RESP_Array) -> (RESP, bool),
+	handler:  Command_Handler,
 }
 
-PING :: Command{"PING", 0, ping}
-ECHO :: Command{"ECHO", 1, echo}
-SET :: Command{"SET", 2, set}
-GET :: Command{"GET", 1, get}
-RPUSH :: Command{"RPUSH", 2, rpush}
+PING :: Command{"PING", 1, ping}
+ECHO :: Command{"ECHO", 2, echo}
+SET :: Command{"SET", 3, set}
+GET :: Command{"GET", 2, get}
+RPUSH :: Command{"RPUSH", 3, rpush}
+LRANGE :: Command{"LRANGE", 4, lrange}
 
 commands := map[string]Command {
-	PING.name  = PING,
-	ECHO.name  = ECHO,
-	SET.name   = SET,
-	GET.name   = GET,
-	RPUSH.name = RPUSH,
+	PING.name   = PING,
+	ECHO.name   = ECHO,
+	SET.name    = SET,
+	GET.name    = GET,
+	RPUSH.name  = RPUSH,
+	LRANGE.name = LRANGE,
 }
 
-ping :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
-	if len(resp.elements) - 1 == 1 {
+ping :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	if len(resp.elements) > 1 {
 		return echo(db, resp)
 	}
 	return RESP_Simple_String{"PONG"}, true
 }
 
-echo :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
-	assert(len(resp.elements) - 1 == ECHO.min_args)
+echo :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	assert(len(resp.elements) == ECHO.min_args)
 	return resp.elements[1], true
 }
 
-set :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
-	elem_count := len(resp.elements)
-	assert(elem_count - 1 >= SET.min_args)
+set :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	argc := len(resp.elements)
+	assert(argc >= SET.min_args)
 
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 	val := (resp.elements[2].(RESP_Bulk_String)).value
@@ -150,13 +153,13 @@ set :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 		value = val,
 	}
 
-	for i := 3; i < elem_count; i += 1 {
+	for i := 3; i < argc; i += 1 {
 		opt := resp.elements[i].(RESP_Bulk_String)
 		opt_key := strings.to_upper(opt.value)
 		switch opt_key {
 		case "PX":
 			i += 1
-			if i > elem_count {
+			if i > argc {
 				continue
 			}
 			opt_val := resp.elements[i].(RESP_Bulk_String)
@@ -178,8 +181,8 @@ set :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 	return RESP_Simple_String{"OK"}, true
 }
 
-get :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
-	assert(len(resp.elements) - 1 == GET.min_args)
+get :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	assert(len(resp.elements) == GET.min_args)
 
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 	val, get_ok := database_get(&database, key)
@@ -198,9 +201,9 @@ get :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 	return RESP_Bulk_String{str.value}, true
 }
 
-rpush :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
+rpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	argc := len(resp.elements)
-	assert(argc - 1 >= RPUSH.min_args)
+	assert(argc >= RPUSH.min_args)
 
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 	values_count := argc - 2
@@ -215,10 +218,7 @@ rpush :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 
 	for i := 2; i < argc; i += 1 {
 		value := (resp.elements[i].(RESP_Bulk_String)).value
-		str_obj := String_Cachable{}
-		str_obj.value = value
-		list.push_back(&list_obj.elements, &str_obj.node)
-		list_obj.count += 1
+		append(&list_obj.elements, value)
 	}
 
 	set_ok := database_set(&database, key, list_obj)
@@ -226,7 +226,41 @@ rpush :: proc(db: Database, resp: RESP_Array) -> (RESP, bool) {
 		return {}, false
 	}
 
-	return RESP_Integer{list_obj.count}, true
+	return RESP_Integer{i64(len(list_obj.elements))}, true
+}
+
+lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	argc := len(resp.elements)
+	assert(argc == LRANGE.min_args)
+
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+	start_str := (resp.elements[2].(RESP_Bulk_String)).value
+	stop_str := (resp.elements[3].(RESP_Bulk_String)).value
+	start, start_ok := strconv.parse_int(start_str)
+	stop, stop_ok := strconv.parse_int(stop_str)
+
+	obj, get_ok := database_get(db, key)
+	if !get_ok {
+		return RESP_Array{}, true
+	}
+
+	list_obj := obj.(List_Cachable)
+	elem_count := len(list_obj.elements)
+	if start > elem_count {
+		return RESP_Array{}, true
+	}
+	if stop > elem_count {
+		stop = elem_count-1
+	}
+
+	values := make([dynamic]RESP)
+//	defer delete(values)
+	for i := start; i <= stop; i += 1 {
+		elem := list_obj.elements[i]
+		append(&values, RESP_Bulk_String{elem})
+	}
+
+	return RESP_Array{values}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
