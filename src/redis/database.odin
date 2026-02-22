@@ -51,6 +51,38 @@ list_prepend :: proc(l: ^List, value: string) {
 	l.len += 1
 }
 
+list_pop_front :: proc(l: ^List, count: int = 1) -> []string {
+	popped := make([dynamic]string)
+
+	iter := list.iterator_head(l.elements^, List_Item, "node")
+	for i := 0; i < count; i += 1 {
+		item, ok := list.iterate_next(&iter)
+		if !ok {
+			break
+		}
+		append(&popped, item.value)
+		list.pop_front(l.elements)
+	}
+
+	return popped[:]
+}
+
+list_pop_back :: proc(l: ^List, count: int = 1) -> []string {
+	popped := make([dynamic]string)
+
+	iter := list.iterator_tail(l.elements^, List_Item, "node")
+	for i := 0; i < count; i += 1 {
+		item, ok := list.iterate_prev(&iter)
+		if !ok {
+			break
+		}
+		append(&popped, item.value)
+		list.pop_back(l.elements)
+	}
+
+	return popped[:]
+}
+
 database_init :: proc(capacity: int = 100, allocator := context.allocator) -> Database {
 	db := Database{}
 	db.cache = new(lru.Cache(string, Cachable), allocator)

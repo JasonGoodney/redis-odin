@@ -6,6 +6,7 @@ import "core:container/intrusive/list"
 import "core:fmt"
 import "core:math"
 import "core:net"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:thread"
@@ -123,6 +124,8 @@ RPUSH :: Command{"RPUSH", 3, rpush}
 LPUSH :: Command{"LPUSH", 3, lpush}
 LRANGE :: Command{"LRANGE", 4, lrange}
 LLEN :: Command{"LLEN", 2, llen}
+LPOP :: Command{"LPOP", 2, lpop}
+RPOP :: Command{"RPOP", 2, rpop}
 
 commands := map[string]Command {
 	PING.name   = PING,
@@ -133,6 +136,8 @@ commands := map[string]Command {
 	LPUSH.name  = LPUSH,
 	LRANGE.name = LRANGE,
 	LLEN.name   = LLEN,
+	LPOP.name   = LPOP,
+	RPOP.name   = RPOP,
 }
 
 ping :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
@@ -217,7 +222,7 @@ lpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 push :: proc(
 	db: ^Database,
 	resp: RESP_Array,
-	push_proc: proc(list: ^List, value: string),
+	pusher: proc(list: ^List, value: string),
 ) -> (
 	RESP,
 	bool,
@@ -238,7 +243,7 @@ push :: proc(
 
 	for i := 2; i < argc; i += 1 {
 		value := (resp.elements[i].(RESP_Bulk_String)).value
-		push_proc(&list_obj, value)
+		pusher(&list_obj, value)
 	}
 
 	set_ok := database_set(&database, key, list_obj)
@@ -324,6 +329,61 @@ llen :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	}
 
 	return RESP_Integer{i64(list.len)}, true
+}
+
+lpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	return pop(LPOP, db, resp, list_pop_front)
+}
+
+rpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	return pop(RPOP, db, resp, list_pop_back)
+}
+
+pop :: proc(
+	cmd: Command,
+	db: ^Database,
+	resp: RESP_Array,
+	popper: proc(l: ^List, count: int = 1) -> []string,
+) -> (
+	RESP,
+	bool,
+) {
+	argc := len(resp.elements)
+	if (argc < cmd.min_args) {
+		fmt.eprintfln("Usage: %s key [count]", cmd.name)
+		return {}, false
+	}
+
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+	count := 1
+	if (argc > cmd.min_args) {
+		countstr := (resp.elements[2].(RESP_Bulk_String)).value
+		i, ok := strconv.parse_int(countstr)
+		if ok {
+			count = i
+		}
+	}
+
+	obj, get_ok := database_get(db, key)
+	if !get_ok {
+		return RESP_Null_Bulk_String{}, true
+	}
+
+	list, cast_ok := obj.(List)
+	if !cast_ok {
+		return RESP_Null_Bulk_String{}, true
+	}
+
+	popped := popper(&list, count)
+	if len(popped) == 1 {
+		return RESP_Bulk_String{popped[0]}, true
+	} else {
+		bulkstrs := make([dynamic]RESP)
+		for str in popped {
+			append(&bulkstrs, RESP_Bulk_String{str})
+		}
+		return RESP_Array{bulkstrs}, true
+	}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
