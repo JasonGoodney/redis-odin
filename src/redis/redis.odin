@@ -121,6 +121,7 @@ SET :: Command{"SET", 3, set}
 GET :: Command{"GET", 2, get}
 RPUSH :: Command{"RPUSH", 3, rpush}
 LRANGE :: Command{"LRANGE", 4, lrange}
+LPUSH :: Command{"LPUSH", 3, lpush}
 
 commands := map[string]Command {
 	PING.name   = PING,
@@ -129,6 +130,7 @@ commands := map[string]Command {
 	GET.name    = GET,
 	RPUSH.name  = RPUSH,
 	LRANGE.name = LRANGE,
+	LPUSH.name  = LPUSH,
 }
 
 ping :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
@@ -209,17 +211,17 @@ rpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 	values_count := argc - 2
 
-	list_obj: List_Cachable
+	list_obj: List
 
 	if existing_obj, peek_ok := database_peek(&database, key); peek_ok {
-		list_obj = existing_obj.(List_Cachable)
+		list_obj = existing_obj.(List)
 	} else {
-		list_obj = List_Cachable{}
+		list_obj = list_init()
 	}
 
 	for i := 2; i < argc; i += 1 {
 		value := (resp.elements[i].(RESP_Bulk_String)).value
-		append(&list_obj.elements, value)
+		list_append(&list_obj, value)
 	}
 
 	set_ok := database_set(&database, key, list_obj)
@@ -227,7 +229,7 @@ rpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 		return {}, false
 	}
 
-	return RESP_Integer{i64(len(list_obj.elements))}, true
+	return RESP_Integer{i64(list_obj.len)}, true
 }
 
 lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
@@ -245,8 +247,8 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 		return RESP_Array{}, true
 	}
 
-	list_obj := obj.(List_Cachable)
-	elem_count := len(list_obj.elements)
+	list_obj := obj.(List)
+	elem_count := list_obj.len
 
 	if start > elem_count {
 		return RESP_Array{}, true
@@ -270,12 +272,50 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 
 	values := make([dynamic]RESP)
 	//	defer delete(values)
-	for i := start; i <= stop; i += 1 {
-		elem := list_obj.elements[i]
-		append(&values, RESP_Bulk_String{elem})
+
+	iter := list.iterator_head(list_obj.elements^, List_Item, "node")
+	i := 0
+	for elem in list.iterate_next(&iter) {
+		if i < start {
+			i += 1
+			continue
+		}
+		if i > stop {
+			break
+		}
+		append(&values, RESP_Bulk_String{elem.value})
+		i += 1
 	}
 
 	return RESP_Array{values}, true
+}
+
+lpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	argc := len(resp.elements)
+	assert(argc >= RPUSH.min_args)
+
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+	values_count := argc - 2
+
+	list_obj: List
+
+	if existing_obj, peek_ok := database_peek(&database, key); peek_ok {
+		list_obj = existing_obj.(List)
+	} else {
+		list_obj = list_init()
+	}
+
+	for i := 2; i < argc; i += 1 {
+		value := (resp.elements[i].(RESP_Bulk_String)).value
+		list_prepend(&list_obj, value)
+	}
+
+	set_ok := database_set(&database, key, list_obj)
+	if !set_ok {
+		return {}, false
+	}
+
+	return RESP_Integer{i64(list_obj.len)}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {

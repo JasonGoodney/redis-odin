@@ -13,7 +13,7 @@ Database :: struct {
 
 Cachable :: union {
 	String_Cachable,
-	List_Cachable,
+	List,
 }
 
 String_Cachable :: struct {
@@ -21,8 +21,34 @@ String_Cachable :: struct {
 	expires_at: time.Time,
 }
 
-List_Cachable :: struct {
-	elements: [dynamic]string,
+List_Item :: struct {
+	node:  list.Node,
+	value: string,
+}
+
+List :: struct {
+	len:      int,
+	elements: ^list.List,
+}
+
+list_init :: proc() -> List {
+	l := List{}
+	l.elements = new(list.List)
+	return l
+}
+
+list_append :: proc(l: ^List, value: string) {
+	item := new(List_Item)
+	item.value = value
+	list.push_back(l.elements, &item.node)
+	l.len += 1
+}
+
+list_prepend :: proc(l: ^List, value: string) {
+	item := new(List_Item)
+	item.value = value
+	list.push_front(l.elements, &item.node)
+	l.len += 1
 }
 
 database_init :: proc(capacity: int = 100, allocator := context.allocator) -> Database {
