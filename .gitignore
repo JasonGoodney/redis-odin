@@ -1,6 +1,7 @@
 .zed
 tests/
 debug*
+*.rdb
 
 # User-specific files
 *.suo
