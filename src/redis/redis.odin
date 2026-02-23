@@ -8,21 +8,26 @@ import "core:container/queue"
 import "core:fmt"
 import "core:math"
 import "core:net"
-import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:thread"
 import "core:time"
 
-Client :: struct {
-	socket_queue: queue.Queue(net.TCP_Socket),
-	socket:       net.TCP_Socket,
-	database:     ^Database,
+g_server: Server
+Server :: struct {
+	socket:      net.TCP_Socket,
+	database:    ^Database,
+	connections: queue.Queue(^Connection),
 }
 
-db_handle: ^Database
+Connection :: struct {
+	server: ^Server,
+	socket: net.TCP_Socket,
+	buffer: [256]byte,
+}
 
 connect :: proc(ip: string, port: int) {
+
 	local_addr, addr_ok := net.parse_ip4_address(ip)
 	if !addr_ok {
 		fmt.println("Failed to parse IP address")
@@ -34,20 +39,20 @@ connect :: proc(ip: string, port: int) {
 		port    = port,
 	}
 
-	server, err := net.listen_tcp(endpoint)
-	if err != nil {
-		fmt.println("Failed to listen on TCP", err)
-		return
-	}
-
-	db_handle = database_init()
+	socket, listen_err := net.listen_tcp(endpoint)
+	fmt.assertf(listen_err == nil, "Failed to listen on [%s:%d]: %v", ip, port, listen_err)
+	g_server.socket = socket
+	g_server.database = database_init()
 
 	fmt.printfln("Listening on TCP: %s", net.endpoint_to_string(endpoint))
 
 	retry := 1
 	max_retries := 5
 	for {
-		cli, _, err_accept := net.accept_tcp(server)
+		client, _, err_accept := net.accept_tcp(g_server.socket)
+		conn := new(Connection)
+		conn.server = &g_server
+		conn.socket = client
 
 		if err_accept != nil {
 			fmt.println("Failed to accept TCP connection")
@@ -58,23 +63,22 @@ connect :: proc(ip: string, port: int) {
 			continue
 		}
 
-		thread.create_and_start_with_poly_data(cli, handle_msg)
+		thread.create_and_start_with_poly_data(conn, handle_msg)
 	}
 
 	fmt.println("Closing server.")
 
-	net.close(server)
+	net.close(g_server.socket)
 }
 
-handle_msg :: proc(client: net.TCP_Socket) {
-	buffer: [256]u8
+handle_msg :: proc(conn: ^Connection) {
 	for {
-		bytes_recv, err_recv := net.recv_tcp(client, buffer[:])
+		bytes_recv, err_recv := net.recv_tcp(conn.socket, conn.buffer[:])
 		if err_recv != nil {
 			fmt.println("Failed to receive data", err_recv)
 			break
 		}
-		received := buffer[:bytes_recv]
+		received := conn.buffer[:bytes_recv]
 		if len(received) == 0 ||
 		   is_ctrl_d(received) ||
 		   is_empty(received) ||
@@ -90,7 +94,7 @@ handle_msg :: proc(client: net.TCP_Socket) {
 
 		name := (resp.elements[0].(RESP_Bulk_String)).value
 		cmd := commands_table[strings.to_upper(name)]
-		res_resp, cmd_ok := cmd.handler(db_handle, resp)
+		res_resp, cmd_ok := cmd.handler(conn, resp)
 
 		response: string
 		if !cmd_ok {
@@ -102,7 +106,7 @@ handle_msg :: proc(client: net.TCP_Socket) {
 		assert(response != "")
 
 		buffer := transmute([]u8)response
-		bytes_sent, err_send := net.send_tcp(client, buffer)
+		bytes_sent, err_send := net.send_tcp(conn.socket, buffer)
 		if err_send != nil {
 			fmt.println("Failed to send data")
 		}
@@ -111,10 +115,10 @@ handle_msg :: proc(client: net.TCP_Socket) {
 		fmt.printfln("Server sent [ %d bytes ]: %s", len(sent), sent)
 	}
 
-	net.close(client)
+	net.close(conn.socket)
 }
 
-Command_Handler :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool)
+Command_Handler :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool)
 Command :: struct {
 	name:     string,
 	min_args: int,
@@ -150,19 +154,19 @@ commands_table := map[string]Command {
 }
 
 
-ping :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+ping :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
 	if len(resp.elements) > 1 {
-		return echo(db, resp)
+		return echo(conn, resp)
 	}
 	return RESP_Simple_String{"PONG"}, true
 }
 
-echo :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+echo :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
 	assert(len(resp.elements) == ECHO.min_args)
 	return resp.elements[1], true
 }
 
-set :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+set :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
 	argc := len(resp.elements)
 	assert(argc >= SET.min_args)
 
@@ -193,7 +197,7 @@ set :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 		}
 	}
 
-	set_ok := database_set(db_handle, key, obj)
+	set_ok := database_set(conn.server.database, key, obj)
 	if !set_ok {
 		return {}, false
 	}
@@ -201,11 +205,11 @@ set :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	return RESP_Simple_String{"OK"}, true
 }
 
-get :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+get :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
 	assert(len(resp.elements) == GET.min_args)
 
 	key := (resp.elements[1].(RESP_Bulk_String)).value
-	val, get_ok := database_get(db_handle, key)
+	val, get_ok := database_get(conn.server.database, key)
 	if !get_ok {
 		fmt.printfln("Item not found for %s", key)
 		return {}, false
@@ -214,23 +218,23 @@ get :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	str := val.(String_Value)
 	if str.expires_at != {} && time.diff(time.now(), str.expires_at) < 0 {
 		fmt.printfln("Item expired for %s", key)
-		database_remove(db_handle, key)
+		database_remove(conn.server.database, key)
 		return RESP_Null_Bulk_String{}, true
 	}
 
 	return RESP_Bulk_String{str.value}, true
 }
 
-rpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
-	return push(db, resp, list_append)
+rpush :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
+	return push(conn, resp, list_append)
 }
 
-lpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
-	return push(db, resp, list_prepend)
+lpush :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
+	return push(conn, resp, list_prepend)
 }
 
 push :: proc(
-	db: ^Database,
+	conn: ^Connection,
 	resp: RESP_Array,
 	pusher: proc(list: ^List_Value, value: string),
 ) -> (
@@ -245,7 +249,7 @@ push :: proc(
 
 	list_obj: List_Value
 
-	if existing_obj, peek_ok := database_peek(db_handle, key); peek_ok {
+	if existing_obj, peek_ok := database_peek(conn.server.database, key); peek_ok {
 		list_obj = existing_obj.(List_Value)
 	} else {
 		list_obj = list_init()
@@ -256,7 +260,7 @@ push :: proc(
 		pusher(&list_obj, value)
 	}
 
-	set_ok := database_set(db_handle, key, list_obj)
+	set_ok := database_set(conn.server.database, key, list_obj)
 	if !set_ok {
 		return {}, false
 	}
@@ -264,7 +268,7 @@ push :: proc(
 	return RESP_Integer{i64(list_obj.len)}, true
 }
 
-lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+lrange :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
 	argc := len(resp.elements)
 	assert(argc == LRANGE.min_args)
 
@@ -274,7 +278,7 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	start, start_ok := strconv.parse_int(start_str)
 	stop, stop_ok := strconv.parse_int(stop_str)
 
-	obj, get_ok := database_get(db, key)
+	obj, get_ok := database_get(conn.server.database, key)
 	if !get_ok {
 		return RESP_Array{}, true
 	}
@@ -322,13 +326,13 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	return RESP_Array{values}, true
 }
 
-llen :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+llen :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
 	argc := len(resp.elements)
 	assert(argc == LLEN.min_args)
 
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 
-	obj, get_ok := database_get(db, key)
+	obj, get_ok := database_get(conn.server.database, key)
 	if !get_ok {
 		return RESP_Integer{0}, true
 	}
@@ -341,17 +345,17 @@ llen :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	return RESP_Integer{i64(list.len)}, true
 }
 
-lpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
-	return pop(LPOP, db, resp, list_pop_front)
+lpop :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
+	return pop(LPOP, conn, resp, list_pop_front)
 }
 
-rpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
-	return pop(RPOP, db, resp, list_pop_back)
+rpop :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
+	return pop(RPOP, conn, resp, list_pop_back)
 }
 
 pop :: proc(
 	cmd: Command,
-	db: ^Database,
+	conn: ^Connection,
 	resp: RESP_Array,
 	popper: proc(l: ^List_Value, count: int = 1) -> []string,
 ) -> (
@@ -374,7 +378,7 @@ pop :: proc(
 		}
 	}
 
-	obj, get_ok := database_get(db, key)
+	obj, get_ok := database_get(conn.server.database, key)
 	if !get_ok {
 		return RESP_Null_Bulk_String{}, true
 	}
@@ -396,17 +400,17 @@ pop :: proc(
 	}
 }
 
-blpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
-	return bpop(BLPOP, db, resp, list_pop_front)
+blpop :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
+	return bpop(BLPOP, conn, resp, list_pop_front)
 }
 
-brpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
-	return bpop(BRPOP, db, resp, list_pop_back)
+brpop :: proc(conn: ^Connection, resp: RESP_Array) -> (RESP, bool) {
+	return bpop(BRPOP, conn, resp, list_pop_back)
 }
 
 bpop :: proc(
 	cmd: Command,
-	db: ^Database,
+	conn: ^Connection,
 	resp: RESP_Array,
 	callback: proc(l: ^List_Value, count: int = 1) -> []string,
 ) -> (
