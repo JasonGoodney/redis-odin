@@ -89,7 +89,7 @@ handle_msg :: proc(client: net.TCP_Socket) {
 		resp := decoded.(RESP_Array)
 
 		name := (resp.elements[0].(RESP_Bulk_String)).value
-		cmd := commands[strings.to_upper(name)]
+		cmd := commands_table[strings.to_upper(name)]
 		res_resp, cmd_ok := cmd.handler(db_handle, resp)
 
 		response: string
@@ -134,7 +134,7 @@ RPOP :: Command{"RPOP", 2, rpop}
 BLPOP :: Command{"BLPOP", 3, blpop}
 BRPOP :: Command{"BRPOP", 3, brpop}
 
-commands := map[string]Command {
+commands_table := map[string]Command {
 	PING.name   = PING,
 	ECHO.name   = ECHO,
 	SET.name    = SET,
