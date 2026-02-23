@@ -7,54 +7,55 @@ import "core:sync"
 import "core:time"
 
 Database :: struct {
-	cache: ^lru.Cache(string, Cachable),
+	cache: ^lru.Cache(string, Redis_Value),
 	lock:  sync.RW_Mutex,
 }
 
-Cachable :: union {
-	String_Cachable,
-	List,
+Redis_Value :: union {
+	String_Value,
+	List_Value,
 }
 
-String_Cachable :: struct {
+String_Value :: struct {
 	value:      string,
 	expires_at: time.Time,
 }
 
-List_Item :: struct {
+@(private)
+List_Element :: struct {
 	node:  list.Node,
 	value: string,
 }
 
-List :: struct {
+List_Value :: struct {
 	len:      int,
 	elements: ^list.List,
 }
 
-list_init :: proc() -> List {
-	l := List{}
+list_init :: proc() -> List_Value {
+	l := List_Value{}
 	l.elements = new(list.List)
 	return l
 }
 
-list_append :: proc(l: ^List, value: string) {
-	item := new(List_Item)
+list_append :: proc(l: ^List_Value, value: string) {
+	item := new(List_Element)
 	item.value = value
 	list.push_back(l.elements, &item.node)
 	l.len += 1
 }
 
-list_prepend :: proc(l: ^List, value: string) {
-	item := new(List_Item)
+list_prepend :: proc(l: ^List_Value, value: string) {
+	item := new(List_Element)
 	item.value = value
 	list.push_front(l.elements, &item.node)
 	l.len += 1
 }
 
-list_pop_front :: proc(l: ^List, count: int = 1) -> []string {
+list_pop_front :: proc(l: ^List_Value, count: int = 1) -> []string {
 	popped := make([dynamic]string)
 
-	iter := list.iterator_head(l.elements^, List_Item, "node")
+	iter := list.iterator_head(l.elements^, List_Element, "node")
 	for i := 0; i < count; i += 1 {
 		item, ok := list.iterate_next(&iter)
 		if !ok {
@@ -67,10 +68,10 @@ list_pop_front :: proc(l: ^List, count: int = 1) -> []string {
 	return popped[:]
 }
 
-list_pop_back :: proc(l: ^List, count: int = 1) -> []string {
+list_pop_back :: proc(l: ^List_Value, count: int = 1) -> []string {
 	popped := make([dynamic]string)
 
-	iter := list.iterator_tail(l.elements^, List_Item, "node")
+	iter := list.iterator_tail(l.elements^, List_Element, "node")
 	for i := 0; i < count; i += 1 {
 		item, ok := list.iterate_prev(&iter)
 		if !ok {
@@ -85,7 +86,7 @@ list_pop_back :: proc(l: ^List, count: int = 1) -> []string {
 
 database_init :: proc(capacity: int = 100, allocator := context.allocator) -> Database {
 	db := Database{}
-	db.cache = new(lru.Cache(string, Cachable), allocator)
+	db.cache = new(lru.Cache(string, Redis_Value), allocator)
 	lru.init(db.cache, capacity, allocator)
 	return db
 }
@@ -95,7 +96,7 @@ database_destroy :: proc(db: ^Database) {
 	free(db)
 }
 
-database_set :: proc(db: ^Database, key: string, value: Cachable) -> (ok: bool) {
+database_set :: proc(db: ^Database, key: string, value: Redis_Value) -> (ok: bool) {
 	assert(db.cache.capacity > 0)
 
 	sync.rw_mutex_lock(&db.lock)
@@ -108,7 +109,7 @@ database_set :: proc(db: ^Database, key: string, value: Cachable) -> (ok: bool) 
 	return err == nil
 }
 
-database_peek :: proc(db: ^Database, key: string) -> (value: Cachable, ok: bool) {
+database_peek :: proc(db: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
 	sync.rw_mutex_lock(&db.lock)
 	value, ok = lru.peek(db.cache, key)
 	sync.rw_mutex_unlock(&db.lock)
@@ -116,7 +117,7 @@ database_peek :: proc(db: ^Database, key: string) -> (value: Cachable, ok: bool)
 	return value, ok
 }
 
-database_get :: proc(db: ^Database, key: string) -> (value: Cachable, ok: bool) {
+database_get :: proc(db: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
 	sync.rw_mutex_lock(&db.lock)
 	value, ok = lru.get(db.cache, key)
 	sync.rw_mutex_unlock(&db.lock)

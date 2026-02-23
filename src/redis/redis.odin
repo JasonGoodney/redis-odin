@@ -2,7 +2,9 @@
 
 package redis
 
+import "base:intrinsics"
 import "core:container/intrusive/list"
+import "core:container/queue"
 import "core:fmt"
 import "core:math"
 import "core:net"
@@ -13,8 +15,9 @@ import "core:thread"
 import "core:time"
 
 Client :: struct {
-	socket:   net.TCP_Socket,
-	database: ^Database,
+	socket_queue: queue.Queue(net.TCP_Socket),
+	socket:       net.TCP_Socket,
+	database:     ^Database,
 }
 
 database: Database
@@ -31,20 +34,20 @@ connect :: proc(ip: string, port: int) {
 		port    = port,
 	}
 
-	sock, err := net.listen_tcp(endpoint)
+	server, err := net.listen_tcp(endpoint)
 	if err != nil {
 		fmt.println("Failed to listen on TCP", err)
 		return
 	}
 
-	database = database_init(allocator = context.allocator)
+	database = database_init()
 
 	fmt.printfln("Listening on TCP: %s", net.endpoint_to_string(endpoint))
 
 	retry := 1
 	max_retries := 5
 	for {
-		cli, _, err_accept := net.accept_tcp(sock)
+		cli, _, err_accept := net.accept_tcp(server)
 
 		if err_accept != nil {
 			fmt.println("Failed to accept TCP connection")
@@ -58,7 +61,9 @@ connect :: proc(ip: string, port: int) {
 		thread.create_and_start_with_poly_data(cli, handle_msg)
 	}
 
-	net.close(sock)
+	fmt.println("Closing server.")
+
+	net.close(server)
 }
 
 handle_msg :: proc(client: net.TCP_Socket) {
@@ -126,6 +131,8 @@ LRANGE :: Command{"LRANGE", 4, lrange}
 LLEN :: Command{"LLEN", 2, llen}
 LPOP :: Command{"LPOP", 2, lpop}
 RPOP :: Command{"RPOP", 2, rpop}
+BLPOP :: Command{"BLPOP", 3, blpop}
+BRPOP :: Command{"BRPOP", 3, brpop}
 
 commands := map[string]Command {
 	PING.name   = PING,
@@ -138,7 +145,10 @@ commands := map[string]Command {
 	LLEN.name   = LLEN,
 	LPOP.name   = LPOP,
 	RPOP.name   = RPOP,
+	BLPOP.name  = BLPOP,
+	BRPOP.name  = BRPOP,
 }
+
 
 ping :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	if len(resp.elements) > 1 {
@@ -159,7 +169,7 @@ set :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 	val := (resp.elements[2].(RESP_Bulk_String)).value
 
-	obj := String_Cachable {
+	obj := String_Value {
 		value = val,
 	}
 
@@ -201,7 +211,7 @@ get :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 		return {}, false
 	}
 
-	str := val.(String_Cachable)
+	str := val.(String_Value)
 	if str.expires_at != {} && time.diff(time.now(), str.expires_at) < 0 {
 		fmt.printfln("Item expired for %s", key)
 		database_remove(&database, key)
@@ -222,7 +232,7 @@ lpush :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 push :: proc(
 	db: ^Database,
 	resp: RESP_Array,
-	pusher: proc(list: ^List, value: string),
+	pusher: proc(list: ^List_Value, value: string),
 ) -> (
 	RESP,
 	bool,
@@ -233,10 +243,10 @@ push :: proc(
 	key := (resp.elements[1].(RESP_Bulk_String)).value
 	values_count := argc - 2
 
-	list_obj: List
+	list_obj: List_Value
 
 	if existing_obj, peek_ok := database_peek(&database, key); peek_ok {
-		list_obj = existing_obj.(List)
+		list_obj = existing_obj.(List_Value)
 	} else {
 		list_obj = list_init()
 	}
@@ -269,7 +279,7 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 		return RESP_Array{}, true
 	}
 
-	list_obj := obj.(List)
+	list_obj := obj.(List_Value)
 	elem_count := list_obj.len
 
 	if start > elem_count {
@@ -295,7 +305,7 @@ lrange :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	values := make([dynamic]RESP)
 	//	defer delete(values)
 
-	iter := list.iterator_head(list_obj.elements^, List_Item, "node")
+	iter := list.iterator_head(list_obj.elements^, List_Element, "node")
 	i := 0
 	for elem in list.iterate_next(&iter) {
 		if i < start {
@@ -323,7 +333,7 @@ llen :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 		return RESP_Integer{0}, true
 	}
 
-	list, cast_ok := obj.(List)
+	list, cast_ok := obj.(List_Value)
 	if !cast_ok {
 		return RESP_Simple_Error{"Not a list"}, true
 	}
@@ -343,14 +353,14 @@ pop :: proc(
 	cmd: Command,
 	db: ^Database,
 	resp: RESP_Array,
-	popper: proc(l: ^List, count: int = 1) -> []string,
+	popper: proc(l: ^List_Value, count: int = 1) -> []string,
 ) -> (
 	RESP,
 	bool,
 ) {
 	argc := len(resp.elements)
 	if (argc < cmd.min_args) {
-		fmt.eprintfln("Usage: %s key [count]", cmd.name)
+		fmt.printfln("Usage: %s key [count]", cmd.name)
 		return {}, false
 	}
 
@@ -369,7 +379,7 @@ pop :: proc(
 		return RESP_Null_Bulk_String{}, true
 	}
 
-	list, cast_ok := obj.(List)
+	list, cast_ok := obj.(List_Value)
 	if !cast_ok {
 		return RESP_Null_Bulk_String{}, true
 	}
@@ -384,6 +394,36 @@ pop :: proc(
 		}
 		return RESP_Array{bulkstrs}, true
 	}
+}
+
+blpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	return bpop(BLPOP, db, resp, list_pop_front)
+}
+
+brpop :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
+	return bpop(BRPOP, db, resp, list_pop_back)
+}
+
+bpop :: proc(
+	cmd: Command,
+	db: ^Database,
+	resp: RESP_Array,
+	callback: proc(l: ^List_Value, count: int = 1) -> []string,
+) -> (
+	RESP,
+	bool,
+) {
+	argc := len(resp.elements)
+	if (argc < cmd.min_args) {
+		fmt.printfln("Usage: %s key [key ...] timeout", cmd.name)
+		return {}, false
+	}
+
+	key := (resp.elements[1].(RESP_Bulk_String)).value
+	timeoutstr := (resp.elements[2].(RESP_Bulk_String)).value
+	timeout, parse_ok := strconv.parse_int(timeoutstr)
+
+	return {}, false
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
