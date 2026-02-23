@@ -6,11 +6,6 @@ import "core:fmt"
 import "core:sync"
 import "core:time"
 
-Database :: struct {
-	cache: ^lru.Cache(string, Redis_Value),
-	lock:  sync.RW_Mutex,
-}
-
 Redis_Value :: union {
 	String_Value,
 	List_Value,
@@ -84,19 +79,39 @@ list_pop_back :: proc(l: ^List_Value, count: int = 1) -> []string {
 	return popped[:]
 }
 
-database_init :: proc(capacity: int = 100, allocator := context.allocator) -> Database {
-	db := Database{}
-	db.cache = new(lru.Cache(string, Redis_Value), allocator)
-	lru.init(db.cache, capacity, allocator)
-	return db
+Database_Impl :: struct {
+	database: Database,
+	cache:    ^lru.Cache(string, Redis_Value),
+	lock:     sync.RW_Mutex,
 }
 
-database_destroy :: proc(db: ^Database) {
+Database :: struct {
+	impl: rawptr,
+}
+
+@(private)
+database_impl :: proc(database: ^Database) -> ^Database_Impl {
+	assert(database != nil && database.impl != nil, "Invalid pointer")
+	return (^Database_Impl)(database.impl)
+}
+
+database_init :: proc(capacity: int = 100, allocator := context.allocator) -> ^Database {
+	impl := new(Database_Impl, allocator)
+	impl.database.impl = impl
+	impl.cache = new(lru.Cache(string, Redis_Value), allocator)
+	lru.init(impl.cache, capacity, allocator)
+
+	return &impl.database
+}
+
+database_destroy :: proc(database: ^Database) {
+	db := database_impl(database)
 	lru.destroy(db.cache, true)
 	free(db)
 }
 
-database_set :: proc(db: ^Database, key: string, value: Redis_Value) -> (ok: bool) {
+database_set :: proc(database: ^Database, key: string, value: Redis_Value) -> (ok: bool) {
+	db := database_impl(database)
 	assert(db.cache.capacity > 0)
 
 	sync.rw_mutex_lock(&db.lock)
@@ -109,7 +124,8 @@ database_set :: proc(db: ^Database, key: string, value: Redis_Value) -> (ok: boo
 	return err == nil
 }
 
-database_peek :: proc(db: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
+database_peek :: proc(database: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
+	db := database_impl(database)
 	sync.rw_mutex_lock(&db.lock)
 	value, ok = lru.peek(db.cache, key)
 	sync.rw_mutex_unlock(&db.lock)
@@ -117,7 +133,8 @@ database_peek :: proc(db: ^Database, key: string) -> (value: Redis_Value, ok: bo
 	return value, ok
 }
 
-database_get :: proc(db: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
+database_get :: proc(database: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
+	db := database_impl(database)
 	sync.rw_mutex_lock(&db.lock)
 	value, ok = lru.get(db.cache, key)
 	sync.rw_mutex_unlock(&db.lock)
@@ -125,7 +142,8 @@ database_get :: proc(db: ^Database, key: string) -> (value: Redis_Value, ok: boo
 	return value, ok
 }
 
-database_remove :: proc(db: ^Database, key: string) -> (ok: bool) {
+database_remove :: proc(database: ^Database, key: string) -> (ok: bool) {
+	db := database_impl(database)
 	sync.rw_mutex_lock(&db.lock)
 	ok = lru.remove(db.cache, key)
 	sync.rw_mutex_unlock(&db.lock)

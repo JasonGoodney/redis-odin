@@ -20,7 +20,7 @@ Client :: struct {
 	database:     ^Database,
 }
 
-database: Database
+db_handle: ^Database
 
 connect :: proc(ip: string, port: int) {
 	local_addr, addr_ok := net.parse_ip4_address(ip)
@@ -40,7 +40,7 @@ connect :: proc(ip: string, port: int) {
 		return
 	}
 
-	database = database_init()
+	db_handle = database_init()
 
 	fmt.printfln("Listening on TCP: %s", net.endpoint_to_string(endpoint))
 
@@ -90,7 +90,7 @@ handle_msg :: proc(client: net.TCP_Socket) {
 
 		name := (resp.elements[0].(RESP_Bulk_String)).value
 		cmd := commands[strings.to_upper(name)]
-		res_resp, cmd_ok := cmd.handler(&database, resp)
+		res_resp, cmd_ok := cmd.handler(db_handle, resp)
 
 		response: string
 		if !cmd_ok {
@@ -193,7 +193,7 @@ set :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 		}
 	}
 
-	set_ok := database_set(&database, key, obj)
+	set_ok := database_set(db_handle, key, obj)
 	if !set_ok {
 		return {}, false
 	}
@@ -205,7 +205,7 @@ get :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	assert(len(resp.elements) == GET.min_args)
 
 	key := (resp.elements[1].(RESP_Bulk_String)).value
-	val, get_ok := database_get(&database, key)
+	val, get_ok := database_get(db_handle, key)
 	if !get_ok {
 		fmt.printfln("Item not found for %s", key)
 		return {}, false
@@ -214,7 +214,7 @@ get :: proc(db: ^Database, resp: RESP_Array) -> (RESP, bool) {
 	str := val.(String_Value)
 	if str.expires_at != {} && time.diff(time.now(), str.expires_at) < 0 {
 		fmt.printfln("Item expired for %s", key)
-		database_remove(&database, key)
+		database_remove(db_handle, key)
 		return RESP_Null_Bulk_String{}, true
 	}
 
@@ -245,7 +245,7 @@ push :: proc(
 
 	list_obj: List_Value
 
-	if existing_obj, peek_ok := database_peek(&database, key); peek_ok {
+	if existing_obj, peek_ok := database_peek(db_handle, key); peek_ok {
 		list_obj = existing_obj.(List_Value)
 	} else {
 		list_obj = list_init()
@@ -256,7 +256,7 @@ push :: proc(
 		pusher(&list_obj, value)
 	}
 
-	set_ok := database_set(&database, key, list_obj)
+	set_ok := database_set(db_handle, key, list_obj)
 	if !set_ok {
 		return {}, false
 	}
