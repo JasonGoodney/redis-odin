@@ -412,10 +412,11 @@ bpop :: proc(
 	bool,
 ) {
 	key := args[1]
-	timeout, parse_ok := strconv.parse_int(args[2])
+	timeout, parse_ok := strconv.parse_f32(args[2])
+	timeout_ms := int(timeout * 1e3)
 
 	for i := 0; true; i += 1 {
-		if timeout > 0 && i > timeout {
+		if timeout > 0 && i > timeout_ms {
 			break
 		}
 
@@ -428,7 +429,7 @@ bpop :: proc(
 			return resp, true
 		}
 
-		time.sleep(time.Second)
+		time.sleep(time.Millisecond)
 	}
 
 	return RESP_Null_Array{}, true
