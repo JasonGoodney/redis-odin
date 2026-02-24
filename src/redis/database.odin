@@ -78,9 +78,9 @@ list_pop_back :: proc(l: ^List_Value, count: int = 1) -> []string {
 }
 
 Database_Impl :: struct {
-	database: Database,
-	kv:       map[string]Redis_Value,
-	lock:     sync.RW_Mutex,
+	handle: Database,
+	db:     map[string]Redis_Value,
+	lock:   sync.RW_Mutex,
 }
 
 Database :: struct {
@@ -89,29 +89,39 @@ Database :: struct {
 
 @(private)
 database_impl :: proc(database: ^Database) -> ^Database_Impl {
-	assert(database != nil && database.impl != nil, "Invalid pointer")
+	assert(database != nil && database.impl != nil, "Invalid database pointer")
 	return (^Database_Impl)(database.impl)
 }
 
 database_init :: proc(capacity: int = 100, allocator := context.allocator) -> ^Database {
 	impl := new(Database_Impl, allocator)
-	impl.database.impl = impl
-	impl.kv = make(map[string]Redis_Value, allocator)
+	impl.handle.impl = impl
+	impl.db = make(map[string]Redis_Value, allocator)
 
-	return &impl.database
+	return &impl.handle
 }
 
 database_destroy :: proc(database: ^Database) {
 	db := database_impl(database)
-	delete(db.kv)
+	delete(db.db)
 	free(db)
+}
+
+strings_set :: proc(db: ^Database, key: string, value: String_Value) -> (ok: bool) {
+	return database_set(db, key, value)
+}
+
+strings_get :: proc(db: ^Database, key: string) -> (value: String_Value, ok: bool) {
+	val := database_get(db, key) or_return
+	value = val.(String_Value) or_return
+	return value, true
 }
 
 database_set :: proc(database: ^Database, key: string, value: Redis_Value) -> (ok: bool) {
 	db := database_impl(database)
 
 	sync.rw_mutex_lock(&db.lock)
-	db.kv[key] = value
+	db.db[key] = value
 	sync.rw_mutex_unlock(&db.lock)
 
 	return true
@@ -131,7 +141,7 @@ database_list_pop :: proc(
 
 	sync.rw_mutex_lock(&db.lock)
 	popped = popper(list, count)
-	db.kv[key] = list^
+	db.db[key] = list^
 	sync.rw_mutex_unlock(&db.lock)
 
 	return popped, true
@@ -153,7 +163,7 @@ database_get_type :: proc(database: ^Database, key: string, $T: typeid) -> (valu
 database_get :: proc(database: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
 	db := database_impl(database)
 	sync.rw_mutex_lock(&db.lock)
-	val, get_ok := db.kv[key]
+	val, get_ok := db.db[key]
 	sync.rw_mutex_unlock(&db.lock)
 
 	if get_ok {
@@ -166,7 +176,7 @@ database_get :: proc(database: ^Database, key: string) -> (value: Redis_Value, o
 database_remove :: proc(database: ^Database, key: string) -> (ok: bool) {
 	db := database_impl(database)
 	sync.rw_mutex_lock(&db.lock)
-	delete_key(&db.kv, key)
+	delete_key(&db.db, key)
 	sync.rw_mutex_unlock(&db.lock)
 
 	return ok

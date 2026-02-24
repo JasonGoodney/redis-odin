@@ -2,7 +2,6 @@
 
 package redis
 
-import "base:intrinsics"
 import "core:container/intrusive/list"
 import "core:container/queue"
 import "core:fmt"
@@ -213,7 +212,7 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 		}
 	}
 
-	set_ok := database_set(conn.server.database, key, obj)
+	set_ok := strings_set(conn.server.database, key, obj)
 	if !set_ok {
 		return {}
 	}
@@ -223,7 +222,7 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 
 get :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
-	val, get_ok := database_get_type(conn.server.database, key, String_Value)
+	val, get_ok := strings_get(conn.server.database, key)
 	if !get_ok {
 		fmt.printfln("Item not found for %s", key)
 		return RESP_Simple_Error{"Key not found"}
