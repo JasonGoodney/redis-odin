@@ -96,17 +96,22 @@ handle_msg :: proc(conn: ^Connection) {
 			return bulkstr.(RESP_Bulk_String).value
 		})
 
+		response: string
+		err_msg, ok := check_command_usage(args)
+		if !ok {
+			// Outputs to the server.
+			// Fix to output to the client
+			fmt.println(err_msg)
+			break
+		}
+
 		cmd := commands_table[strings.to_upper(args[0])]
 		res_resp, cmd_ok := cmd.handler(conn, args)
-
-		response: string
 		if !cmd_ok {
 			response = encode(RESP_Simple_Error{"ERROR"})
 		} else {
 			response = encode(res_resp)
 		}
-
-		assert(response != "")
 
 		buffer := transmute([]u8)response
 		bytes_sent, err_send := net.send_tcp(conn.socket, buffer)
@@ -123,23 +128,24 @@ handle_msg :: proc(conn: ^Connection) {
 
 Command_Handler :: proc(conn: ^Connection, args: []string) -> (RESP, bool)
 Command :: struct {
-	name:     string,
-	min_args: int,
-	handler:  Command_Handler,
+	name:      string,
+	min_args:  int,
+	handler:   Command_Handler,
+	arguments: []string,
 }
 
-PING :: Command{"PING", 1, ping}
-ECHO :: Command{"ECHO", 2, echo}
-SET :: Command{"SET", 3, set}
-GET :: Command{"GET", 2, get}
-RPUSH :: Command{"RPUSH", 3, rpush}
-LPUSH :: Command{"LPUSH", 3, lpush}
-LRANGE :: Command{"LRANGE", 4, lrange}
-LLEN :: Command{"LLEN", 2, llen}
-LPOP :: Command{"LPOP", 2, lpop}
-RPOP :: Command{"RPOP", 2, rpop}
-BLPOP :: Command{"BLPOP", 3, blpop}
-BRPOP :: Command{"BRPOP", 3, brpop}
+PING :: Command{"PING", 1, ping, {"[message]"}}
+ECHO :: Command{"ECHO", 2, echo, {"message"}}
+SET :: Command{"SET", 3, set, {"key", "value", "[options]"}}
+GET :: Command{"GET", 2, get, {"get"}}
+RPUSH :: Command{"RPUSH", 3, rpush, {"key", "element", "[element ...]"}}
+LPUSH :: Command{"LPUSH", 3, lpush, {"key", "element", "[element ...]"}}
+LRANGE :: Command{"LRANGE", 4, lrange, {"key", "start", "stop"}}
+LLEN :: Command{"LLEN", 2, llen, {"key"}}
+LPOP :: Command{"LPOP", 2, lpop, {"key", "[count]"}}
+RPOP :: Command{"RPOP", 2, rpop, {"key", "count"}}
+BLPOP :: Command{"BLPOP", 3, blpop, {"key", "[key ...]", "timeout"}}
+BRPOP :: Command{"BRPOP", 3, brpop, {"key", "[key ...]", "timeout"}}
 
 commands_table := map[string]Command {
 	PING.name   = PING,
@@ -156,6 +162,19 @@ commands_table := map[string]Command {
 	BRPOP.name  = BRPOP,
 }
 
+check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
+	argc := len(args)
+	if argc == 0 {
+		return "Usage: COMMAND args...", false
+	}
+	cmd := commands_table[strings.to_upper(args[0])]
+	if argc < cmd.min_args {
+		str := fmt.tprintf("Usage: %s %s", cmd.name, strings.join(cmd.arguments, " "))
+		return str, false
+	}
+
+	return "", true
+}
 
 ping :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 	if len(args) > 1 {
@@ -165,7 +184,6 @@ ping :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 }
 
 echo :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
-	assert(len(args) == ECHO.min_args)
 	return RESP_Bulk_String{args[1]}, true
 }
 
@@ -456,3 +474,4 @@ is_telnet_ctrl_c :: proc(bytes: []u8) -> bool {
 insensitive_compare :: proc(lhs: string, rhs: string) -> bool {
 	return 0 == strings.compare(strings.to_lower(lhs), strings.to_lower(rhs))
 }
+
