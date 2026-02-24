@@ -224,7 +224,7 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 	val, get_ok := database_get(conn.server.database, key, String_Value)
 	if !get_ok {
 		fmt.printfln("Item not found for %s", key)
-		return {}
+		return RESP_Simple_Error{"Key not found"}
 	}
 
 	if val.expires_at != {} && time.diff(time.now(), val.expires_at) < 0 {
