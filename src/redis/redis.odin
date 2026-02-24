@@ -142,6 +142,7 @@ LPOP :: Command{"LPOP", 2, lpop, {"key", "[count]"}}
 RPOP :: Command{"RPOP", 2, rpop, {"key", "count"}}
 BLPOP :: Command{"BLPOP", 3, blpop, {"key", "[key ...]", "timeout"}}
 BRPOP :: Command{"BRPOP", 3, brpop, {"key", "[key ...]", "timeout"}}
+TYPE :: Command{"TYPE", 2, type, {"key"}}
 
 commands_table := map[string]Command {
 	PING.name   = PING,
@@ -156,6 +157,7 @@ commands_table := map[string]Command {
 	RPOP.name   = RPOP,
 	BLPOP.name  = BLPOP,
 	BRPOP.name  = BRPOP,
+	TYPE.name   = TYPE,
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -221,7 +223,7 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 
 get :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
-	val, get_ok := database_get(conn.server.database, key, String_Value)
+	val, get_ok := database_get_type(conn.server.database, key, String_Value)
 	if !get_ok {
 		fmt.printfln("Item not found for %s", key)
 		return RESP_Simple_Error{"Key not found"}
@@ -255,7 +257,7 @@ push :: proc(
 
 	list_obj: List_Value
 
-	if existing_obj, peek_ok := database_get(conn.server.database, key, List_Value); peek_ok {
+	if existing_obj, peek_ok := database_get_type(conn.server.database, key, List_Value); peek_ok {
 		list_obj = existing_obj
 	} else {
 		list_obj = list_init()
@@ -281,7 +283,7 @@ lrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	start, start_ok := strconv.parse_int(start_str)
 	stop, stop_ok := strconv.parse_int(stop_str)
 
-	list_obj, get_ok := database_get(conn.server.database, key, List_Value)
+	list_obj, get_ok := database_get_type(conn.server.database, key, List_Value)
 	if !get_ok {
 		return RESP_Array{}
 	}
@@ -331,7 +333,7 @@ lrange :: proc(conn: ^Connection, args: []string) -> RESP {
 llen :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
 
-	list, get_ok := database_get(conn.server.database, key, List_Value)
+	list, get_ok := database_get_type(conn.server.database, key, List_Value)
 	if !get_ok {
 		return RESP_Integer{0}
 	}
@@ -362,7 +364,7 @@ pop :: proc(
 		}
 	}
 
-	list, get_ok := database_get(conn.server.database, key, List_Value)
+	list, get_ok := database_get_type(conn.server.database, key, List_Value)
 	if !get_ok {
 		return RESP_Null_Bulk_String{}
 	}
@@ -409,7 +411,7 @@ bpop :: proc(
 			break
 		}
 
-		list, _ := database_get(conn.server.database, key, List_Value)
+		list, _ := database_get_type(conn.server.database, key, List_Value)
 		if list.len > 0 {
 			popped, ok := database_list_pop(conn.server.database, key, &list, 1, popper)
 			resp := RESP_Array{}
@@ -422,6 +424,22 @@ bpop :: proc(
 	}
 
 	return RESP_Null_Array{}
+}
+
+type :: proc(conn: ^Connection, args: []string) -> RESP {
+	val, ok := database_get(conn.server.database, args[1])
+	if !ok {
+		return RESP_Simple_String{"none"}
+	}
+
+	switch t in val {
+	case String_Value:
+		return RESP_Simple_String{"string"}
+	case List_Value:
+		return RESP_Simple_String{"list"}
+	}
+
+	return RESP_Simple_String{"none"}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {

@@ -1,8 +1,6 @@
 package redis
 
 import "core:container/intrusive/list"
-import "core:container/lru"
-import "core:fmt"
 import "core:sync"
 import "core:time"
 
@@ -139,17 +137,27 @@ database_list_pop :: proc(
 	return popped, true
 }
 
-database_get :: proc(database: ^Database, key: string, $T: typeid) -> (value: T, ok: bool) {
-	db := database_impl(database)
-	sync.rw_mutex_lock(&db.lock)
-	val, get_ok := db.kv[key]
-	sync.rw_mutex_unlock(&db.lock)
+database_get_type :: proc(database: ^Database, key: string, $T: typeid) -> (value: T, ok: bool) {
+	val, get_ok := database_get(database, key)
 
 	if get_ok {
 		v, cast_ok := val.(T)
 		if cast_ok {
 			return v, true
 		}
+	}
+
+	return {}, false
+}
+
+database_get :: proc(database: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
+	db := database_impl(database)
+	sync.rw_mutex_lock(&db.lock)
+	val, get_ok := db.kv[key]
+	sync.rw_mutex_unlock(&db.lock)
+
+	if get_ok {
+		return val, true
 	}
 
 	return {}, false
@@ -163,3 +171,4 @@ database_remove :: proc(database: ^Database, key: string) -> (ok: bool) {
 
 	return ok
 }
+
