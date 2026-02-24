@@ -19,6 +19,7 @@ Server :: struct {
 	socket:      net.TCP_Socket,
 	database:    ^Database,
 	connections: queue.Queue(^Connection),
+	blocked:     queue.Queue(^Connection),
 }
 
 Connection :: struct {
@@ -189,8 +190,6 @@ echo :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 
 set :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 	argc := len(args)
-	assert(argc >= SET.min_args)
-
 	key := args[1]
 	val := args[2]
 
@@ -226,23 +225,20 @@ set :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 }
 
 get :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
-	assert(len(args) == GET.min_args)
-
 	key := args[1]
-	val, get_ok := database_get(conn.server.database, key)
+	val, get_ok := database_get(conn.server.database, key, String_Value)
 	if !get_ok {
 		fmt.printfln("Item not found for %s", key)
 		return {}, false
 	}
 
-	str := val.(String_Value)
-	if str.expires_at != {} && time.diff(time.now(), str.expires_at) < 0 {
+	if val.expires_at != {} && time.diff(time.now(), val.expires_at) < 0 {
 		fmt.printfln("Item expired for %s", key)
 		database_remove(conn.server.database, key)
 		return RESP_Null_Bulk_String{}, true
 	}
 
-	return RESP_Bulk_String{str.value}, true
+	return RESP_Bulk_String{val.value}, true
 }
 
 rpush :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
@@ -262,15 +258,13 @@ push :: proc(
 	bool,
 ) {
 	argc := len(args)
-	assert(argc >= RPUSH.min_args)
-
 	key := args[1]
 	values_count := argc - 2
 
 	list_obj: List_Value
 
-	if existing_obj, peek_ok := database_get(conn.server.database, key); peek_ok {
-		list_obj = existing_obj.(List_Value)
+	if existing_obj, peek_ok := database_get(conn.server.database, key, List_Value); peek_ok {
+		list_obj = existing_obj
 	} else {
 		list_obj = list_init()
 	}
@@ -289,21 +283,17 @@ push :: proc(
 }
 
 lrange :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
-	argc := len(args)
-	assert(argc == LRANGE.min_args)
-
 	key := args[1]
 	start_str := args[2]
 	stop_str := args[3]
 	start, start_ok := strconv.parse_int(start_str)
 	stop, stop_ok := strconv.parse_int(stop_str)
 
-	obj, get_ok := database_get(conn.server.database, key)
+	list_obj, get_ok := database_get(conn.server.database, key, List_Value)
 	if !get_ok {
 		return RESP_Array{}, true
 	}
 
-	list_obj := obj.(List_Value)
 	elem_count := list_obj.len
 
 	if start > elem_count {
@@ -347,19 +337,11 @@ lrange :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 }
 
 llen :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
-	argc := len(args)
-	assert(argc == LLEN.min_args)
-
 	key := args[1]
 
-	obj, get_ok := database_get(conn.server.database, key)
+	list, get_ok := database_get(conn.server.database, key, List_Value)
 	if !get_ok {
 		return RESP_Integer{0}, true
-	}
-
-	list, cast_ok := obj.(List_Value)
-	if !cast_ok {
-		return RESP_Simple_Error{"Not a list"}, true
 	}
 
 	return RESP_Integer{i64(list.len)}, true
@@ -382,32 +364,21 @@ pop :: proc(
 	RESP,
 	bool,
 ) {
-	argc := len(args)
-	if (argc < cmd.min_args) {
-		fmt.printfln("Usage: %s key [count]", cmd.name)
-		return {}, false
-	}
-
 	key := args[1]
 	count := 1
-	if (argc > cmd.min_args) {
+	if (len(args) > cmd.min_args) {
 		c, ok := strconv.parse_int(args[2])
 		if ok {
 			count = c
 		}
 	}
 
-	obj, get_ok := database_get(conn.server.database, key)
+	list, get_ok := database_get(conn.server.database, key, List_Value)
 	if !get_ok {
 		return RESP_Null_Bulk_String{}, true
 	}
 
-	list, cast_ok := obj.(List_Value)
-	if !cast_ok {
-		return RESP_Null_Bulk_String{}, true
-	}
-
-	popped := popper(&list, count)
+	popped, set_ok := database_list_pop(conn.server.database, key, &list, count, popper)
 	if len(popped) == 1 {
 		return RESP_Bulk_String{popped[0]}, true
 	} else {
@@ -417,6 +388,10 @@ pop :: proc(
 		}
 		return RESP_Array{bulkstrs}, true
 	}
+}
+
+pop_on_set :: proc(value: ^List_Value, count: int, $T: typeid) -> T {
+
 }
 
 blpop :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
@@ -431,21 +406,32 @@ bpop :: proc(
 	cmd: Command,
 	conn: ^Connection,
 	args: []string,
-	callback: proc(l: ^List_Value, count: int = 1) -> []string,
+	popper: proc(l: ^List_Value, count: int = 1) -> []string,
 ) -> (
 	RESP,
 	bool,
 ) {
-	argc := len(args)
-	if (argc < cmd.min_args) {
-		fmt.printfln("Usage: %s key [key ...] timeout", cmd.name)
-		return {}, false
-	}
-
 	key := args[1]
 	timeout, parse_ok := strconv.parse_int(args[2])
 
-	return {}, false
+	for i := 0; true; i += 1 {
+		if timeout > 0 && i > timeout {
+			break
+		}
+
+		list, ok := database_get(conn.server.database, key, List_Value)
+		if ok && list.len > 0 {
+			popped, ok := database_list_pop(conn.server.database, key, &list, 1, popper)
+			resp := RESP_Array{}
+			append(&resp.elements, RESP_Bulk_String{key})
+			append(&resp.elements, RESP_Bulk_String{popped[0]})
+			return resp, true
+		}
+
+		time.sleep(time.Second)
+	}
+
+	return RESP_Null_Array{}, true
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
@@ -474,4 +460,3 @@ is_telnet_ctrl_c :: proc(bytes: []u8) -> bool {
 insensitive_compare :: proc(lhs: string, rhs: string) -> bool {
 	return 0 == strings.compare(strings.to_lower(lhs), strings.to_lower(rhs))
 }
-

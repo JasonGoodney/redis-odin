@@ -119,13 +119,40 @@ database_set :: proc(database: ^Database, key: string, value: Redis_Value) -> (o
 	return true
 }
 
-database_get :: proc(database: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
+database_list_pop :: proc(
+	database: ^Database,
+	key: string,
+	list: ^List_Value,
+	count: int = 1,
+	popper: proc(l: ^List_Value, count: int = 1) -> []string,
+) -> (
+	popped: []string,
+	ok: bool,
+) {
 	db := database_impl(database)
+
 	sync.rw_mutex_lock(&db.lock)
-	value, ok = db.kv[key]
+	popped = popper(list, count)
+	db.kv[key] = list^
 	sync.rw_mutex_unlock(&db.lock)
 
-	return value, ok
+	return popped, true
+}
+
+database_get :: proc(database: ^Database, key: string, $T: typeid) -> (value: T, ok: bool) {
+	db := database_impl(database)
+	sync.rw_mutex_lock(&db.lock)
+	val, get_ok := db.kv[key]
+	sync.rw_mutex_unlock(&db.lock)
+
+	if get_ok {
+		v, cast_ok := val.(T)
+		if cast_ok {
+			return v, true
+		}
+	}
+
+	return {}, false
 }
 
 database_remove :: proc(database: ^Database, key: string) -> (ok: bool) {
@@ -136,4 +163,3 @@ database_remove :: proc(database: ^Database, key: string) -> (ok: bool) {
 
 	return ok
 }
-
