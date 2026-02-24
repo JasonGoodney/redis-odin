@@ -19,7 +19,6 @@ Server :: struct {
 	socket:      net.TCP_Socket,
 	database:    ^Database,
 	connections: queue.Queue(^Connection),
-	blocked:     queue.Queue(^Connection),
 }
 
 Connection :: struct {
@@ -412,16 +411,19 @@ bpop :: proc(
 	bool,
 ) {
 	key := args[1]
-	timeout, parse_ok := strconv.parse_f32(args[2])
-	timeout_ms := int(timeout * 1e3)
 
-	for i := 0; true; i += 1 {
-		if timeout > 0 && i > timeout_ms {
+	timeout_s, parse_ok := strconv.parse_f64(args[2])
+	if !parse_ok {
+		return RESP_Simple_Error{"Bad Timeout"}, true
+	}
+
+	for i: f64 = 0; true; i += 0.1 {
+		if timeout_s > 0 && i > timeout_s {
 			break
 		}
 
-		list, ok := database_get(conn.server.database, key, List_Value)
-		if ok && list.len > 0 {
+		list, _ := database_get(conn.server.database, key, List_Value)
+		if list.len > 0 {
 			popped, ok := database_list_pop(conn.server.database, key, &list, 1, popper)
 			resp := RESP_Array{}
 			append(&resp.elements, RESP_Bulk_String{key})
@@ -429,7 +431,7 @@ bpop :: proc(
 			return resp, true
 		}
 
-		time.sleep(time.Millisecond)
+		time.sleep(100 * time.Millisecond)
 	}
 
 	return RESP_Null_Array{}, true
@@ -461,3 +463,4 @@ is_telnet_ctrl_c :: proc(bytes: []u8) -> bool {
 insensitive_compare :: proc(lhs: string, rhs: string) -> bool {
 	return 0 == strings.compare(strings.to_lower(lhs), strings.to_lower(rhs))
 }
+
