@@ -106,12 +106,8 @@ handle_msg :: proc(conn: ^Connection) {
 		}
 
 		cmd := commands_table[strings.to_upper(args[0])]
-		res_resp, cmd_ok := cmd.handler(conn, args)
-		if !cmd_ok {
-			response = encode(RESP_Simple_Error{"ERROR"})
-		} else {
-			response = encode(res_resp)
-		}
+		resp := cmd.handler(conn, args)
+		response = encode(resp)
 
 		buffer := transmute([]u8)response
 		bytes_sent, err_send := net.send_tcp(conn.socket, buffer)
@@ -126,7 +122,7 @@ handle_msg :: proc(conn: ^Connection) {
 	net.close(conn.socket)
 }
 
-Command_Handler :: proc(conn: ^Connection, args: []string) -> (RESP, bool)
+Command_Handler :: proc(conn: ^Connection, args: []string) -> RESP
 Command :: struct {
 	name:      string,
 	min_args:  int,
@@ -176,18 +172,18 @@ check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
 	return "", true
 }
 
-ping :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+ping :: proc(conn: ^Connection, args: []string) -> RESP {
 	if len(args) > 1 {
 		return echo(conn, args)
 	}
-	return RESP_Simple_String{"PONG"}, true
+	return RESP_Simple_String{"PONG"}
 }
 
-echo :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
-	return RESP_Bulk_String{args[1]}, true
+echo :: proc(conn: ^Connection, args: []string) -> RESP {
+	return RESP_Bulk_String{args[1]}
 }
 
-set :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+set :: proc(conn: ^Connection, args: []string) -> RESP {
 	argc := len(args)
 	key := args[1]
 	val := args[2]
@@ -217,34 +213,34 @@ set :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 
 	set_ok := database_set(conn.server.database, key, obj)
 	if !set_ok {
-		return {}, false
+		return {}
 	}
 
-	return RESP_Simple_String{"OK"}, true
+	return RESP_Simple_String{"OK"}
 }
 
-get :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+get :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
 	val, get_ok := database_get(conn.server.database, key, String_Value)
 	if !get_ok {
 		fmt.printfln("Item not found for %s", key)
-		return {}, false
+		return {}
 	}
 
 	if val.expires_at != {} && time.diff(time.now(), val.expires_at) < 0 {
 		fmt.printfln("Item expired for %s", key)
 		database_remove(conn.server.database, key)
-		return RESP_Null_Bulk_String{}, true
+		return RESP_Null_Bulk_String{}
 	}
 
-	return RESP_Bulk_String{val.value}, true
+	return RESP_Bulk_String{val.value}
 }
 
-rpush :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+rpush :: proc(conn: ^Connection, args: []string) -> RESP {
 	return push(conn, args, list_append)
 }
 
-lpush :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+lpush :: proc(conn: ^Connection, args: []string) -> RESP {
 	return push(conn, args, list_prepend)
 }
 
@@ -252,10 +248,7 @@ push :: proc(
 	conn: ^Connection,
 	args: []string,
 	pusher: proc(list: ^List_Value, value: string),
-) -> (
-	RESP,
-	bool,
-) {
+) -> RESP {
 	argc := len(args)
 	key := args[1]
 	values_count := argc - 2
@@ -275,13 +268,13 @@ push :: proc(
 
 	set_ok := database_set(conn.server.database, key, list_obj)
 	if !set_ok {
-		return {}, false
+		return {}
 	}
 
-	return RESP_Integer{i64(list_obj.len)}, true
+	return RESP_Integer{i64(list_obj.len)}
 }
 
-lrange :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+lrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
 	start_str := args[2]
 	stop_str := args[3]
@@ -290,13 +283,13 @@ lrange :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 
 	list_obj, get_ok := database_get(conn.server.database, key, List_Value)
 	if !get_ok {
-		return RESP_Array{}, true
+		return RESP_Array{}
 	}
 
 	elem_count := list_obj.len
 
 	if start > elem_count {
-		return RESP_Array{}, true
+		return RESP_Array{}
 	}
 	if math.abs(start) > elem_count {
 		start = 0
@@ -332,25 +325,25 @@ lrange :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
 		i += 1
 	}
 
-	return RESP_Array{values}, true
+	return RESP_Array{values}
 }
 
-llen :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+llen :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
 
 	list, get_ok := database_get(conn.server.database, key, List_Value)
 	if !get_ok {
-		return RESP_Integer{0}, true
+		return RESP_Integer{0}
 	}
 
-	return RESP_Integer{i64(list.len)}, true
+	return RESP_Integer{i64(list.len)}
 }
 
-lpop :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+lpop :: proc(conn: ^Connection, args: []string) -> RESP {
 	return pop(LPOP, conn, args, list_pop_front)
 }
 
-rpop :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+rpop :: proc(conn: ^Connection, args: []string) -> RESP {
 	return pop(RPOP, conn, args, list_pop_back)
 }
 
@@ -359,10 +352,7 @@ pop :: proc(
 	conn: ^Connection,
 	args: []string,
 	popper: proc(l: ^List_Value, count: int = 1) -> []string,
-) -> (
-	RESP,
-	bool,
-) {
+) -> RESP {
 	key := args[1]
 	count := 1
 	if (len(args) > cmd.min_args) {
@@ -374,18 +364,18 @@ pop :: proc(
 
 	list, get_ok := database_get(conn.server.database, key, List_Value)
 	if !get_ok {
-		return RESP_Null_Bulk_String{}, true
+		return RESP_Null_Bulk_String{}
 	}
 
 	popped, set_ok := database_list_pop(conn.server.database, key, &list, count, popper)
 	if len(popped) == 1 {
-		return RESP_Bulk_String{popped[0]}, true
+		return RESP_Bulk_String{popped[0]}
 	} else {
 		bulkstrs := make([dynamic]RESP)
 		for str in popped {
 			append(&bulkstrs, RESP_Bulk_String{str})
 		}
-		return RESP_Array{bulkstrs}, true
+		return RESP_Array{bulkstrs}
 	}
 }
 
@@ -393,11 +383,11 @@ pop_on_set :: proc(value: ^List_Value, count: int, $T: typeid) -> T {
 
 }
 
-blpop :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+blpop :: proc(conn: ^Connection, args: []string) -> RESP {
 	return bpop(BLPOP, conn, args, list_pop_front)
 }
 
-brpop :: proc(conn: ^Connection, args: []string) -> (RESP, bool) {
+brpop :: proc(conn: ^Connection, args: []string) -> RESP {
 	return bpop(BRPOP, conn, args, list_pop_back)
 }
 
@@ -406,15 +396,12 @@ bpop :: proc(
 	conn: ^Connection,
 	args: []string,
 	popper: proc(l: ^List_Value, count: int = 1) -> []string,
-) -> (
-	RESP,
-	bool,
-) {
+) -> RESP {
 	key := args[1]
 
 	timeout_s, parse_ok := strconv.parse_f64(args[2])
 	if !parse_ok {
-		return RESP_Simple_Error{"Bad Timeout"}, true
+		return RESP_Simple_Error{"Bad timeout"}
 	}
 
 	for i: f64 = 0; true; i += 0.1 {
@@ -428,13 +415,13 @@ bpop :: proc(
 			resp := RESP_Array{}
 			append(&resp.elements, RESP_Bulk_String{key})
 			append(&resp.elements, RESP_Bulk_String{popped[0]})
-			return resp, true
+			return resp
 		}
 
 		time.sleep(100 * time.Millisecond)
 	}
 
-	return RESP_Null_Array{}, true
+	return RESP_Null_Array{}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
