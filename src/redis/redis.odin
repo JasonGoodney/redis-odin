@@ -269,7 +269,7 @@ push :: proc(
 
 	list_obj: List_Value
 
-	if existing_obj, peek_ok := database_peek(conn.server.database, key); peek_ok {
+	if existing_obj, peek_ok := database_get(conn.server.database, key); peek_ok {
 		list_obj = existing_obj.(List_Value)
 	} else {
 		list_obj = list_init()

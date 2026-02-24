@@ -81,7 +81,7 @@ list_pop_back :: proc(l: ^List_Value, count: int = 1) -> []string {
 
 Database_Impl :: struct {
 	database: Database,
-	cache:    ^lru.Cache(string, Redis_Value),
+	kv:       map[string]Redis_Value,
 	lock:     sync.RW_Mutex,
 }
 
@@ -98,45 +98,31 @@ database_impl :: proc(database: ^Database) -> ^Database_Impl {
 database_init :: proc(capacity: int = 100, allocator := context.allocator) -> ^Database {
 	impl := new(Database_Impl, allocator)
 	impl.database.impl = impl
-	impl.cache = new(lru.Cache(string, Redis_Value), allocator)
-	lru.init(impl.cache, capacity, allocator)
+	impl.kv = make(map[string]Redis_Value, allocator)
 
 	return &impl.database
 }
 
 database_destroy :: proc(database: ^Database) {
 	db := database_impl(database)
-	lru.destroy(db.cache, true)
+	delete(db.kv)
 	free(db)
 }
 
 database_set :: proc(database: ^Database, key: string, value: Redis_Value) -> (ok: bool) {
 	db := database_impl(database)
-	assert(db.cache.capacity > 0)
 
 	sync.rw_mutex_lock(&db.lock)
-	err := lru.set(db.cache, key, value)
+	db.kv[key] = value
 	sync.rw_mutex_unlock(&db.lock)
 
-	if err != nil {
-		fmt.printfln("Failed to set %s for %s: %s", value, key, err)
-	}
-	return err == nil
-}
-
-database_peek :: proc(database: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
-	db := database_impl(database)
-	sync.rw_mutex_lock(&db.lock)
-	value, ok = lru.peek(db.cache, key)
-	sync.rw_mutex_unlock(&db.lock)
-
-	return value, ok
+	return true
 }
 
 database_get :: proc(database: ^Database, key: string) -> (value: Redis_Value, ok: bool) {
 	db := database_impl(database)
 	sync.rw_mutex_lock(&db.lock)
-	value, ok = lru.get(db.cache, key)
+	value, ok = db.kv[key]
 	sync.rw_mutex_unlock(&db.lock)
 
 	return value, ok
@@ -145,8 +131,9 @@ database_get :: proc(database: ^Database, key: string) -> (value: Redis_Value, o
 database_remove :: proc(database: ^Database, key: string) -> (ok: bool) {
 	db := database_impl(database)
 	sync.rw_mutex_lock(&db.lock)
-	ok = lru.remove(db.cache, key)
+	delete_key(&db.kv, key)
 	sync.rw_mutex_unlock(&db.lock)
 
 	return ok
 }
+
