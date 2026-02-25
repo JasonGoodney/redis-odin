@@ -1,13 +1,16 @@
 package redis
 
-import "core:container/intrusive/list"
+import linked_list "core:container/intrusive/list"
 import "core:math"
+import "core:strconv"
+import "core:strings"
 import "core:sync"
 import "core:time"
 
 Redis_Value :: union {
 	String,
 	List,
+	Stream,
 }
 
 // ====== Strings ===========================
@@ -17,7 +20,7 @@ String :: struct {
 	value:      string,
 }
 
-string_set :: proc(db: ^Database, key: string, value: String) -> (ok: bool) {
+string_set :: proc(db: ^Database, key: string, value: String) -> (error: Database_Error) {
 	impl := database_lock(db)
 	defer database_unlock(impl)
 	return database_set(impl, key, value)
@@ -30,24 +33,45 @@ string_get :: proc(db: ^Database, key: string) -> (value: String, error: Databas
 	return value, .None
 }
 
+// ====== Generic ===========================
+
+generic_type :: proc(db: ^Database, key: string) -> (type: string, error: Database_Error) {
+	impl := database_lock(db)
+	defer database_unlock(impl)
+
+	val := database_get(impl, key) or_return
+
+
+	switch v in val {
+	case String:
+		type = "string"
+	case List:
+		type = "list"
+	case Stream:
+		type = "stream"
+	}
+
+	return type, .None
+}
+
 // ====== Lists ===========================
 
 @(private)
 List_Element :: struct {
-	node:  list.Node,
+	node:  linked_list.Node,
 	value: string,
 }
 
 List :: struct {
 	expires_at: time.Time,
 	len:        i64,
-	elements:   ^list.List,
+	elements:   ^linked_list.List,
 }
 
 @(private)
 list_init :: proc() -> List {
 	l := List{}
-	l.elements = new(list.List)
+	l.elements = new(linked_list.List)
 	return l
 }
 
@@ -105,9 +129,9 @@ list_range :: proc(
 
 	vals := make([dynamic]string)
 
-	iter := list.iterator_head(l.elements^, List_Element, "node")
+	iter := linked_list.iterator_head(l.elements^, List_Element, "node")
 	i: i64 = 0
-	for elem in list.iterate_next(&iter) {
+	for elem in linked_list.iterate_next(&iter) {
 		if elem.value == {} {
 			break
 		}
@@ -145,7 +169,7 @@ list_push_back :: proc(
 	for val in values {
 		elem := new(List_Element)
 		elem.value = val
-		list.push_back(l.elements, &elem.node)
+		linked_list.push_back(l.elements, &elem.node)
 		l.len += 1
 	}
 	database_set(impl, key, l)
@@ -171,7 +195,7 @@ list_push_front :: proc(
 	for val in values {
 		elem := new(List_Element)
 		elem.value = val
-		list.push_front(l.elements, &elem.node)
+		linked_list.push_front(l.elements, &elem.node)
 		l.len += 1
 	}
 	database_set(impl, key, l)
@@ -192,14 +216,14 @@ list_pop_front :: proc(
 	l := database_typed_get(impl, key, List) or_return
 
 	popped := make([dynamic]string)
-	iter := list.iterator_head(l.elements^, List_Element, "node")
+	iter := linked_list.iterator_head(l.elements^, List_Element, "node")
 	for i := 0; i < count; i += 1 {
-		item, ok := list.iterate_next(&iter)
+		item, ok := linked_list.iterate_next(&iter)
 		if !ok {
 			break
 		}
 		append(&popped, item.value)
-		list.pop_front(l.elements)
+		linked_list.pop_front(l.elements)
 	}
 
 	database_set(impl, key, l)
@@ -221,14 +245,14 @@ list_pop_back :: proc(
 	l := database_typed_get(impl, key, List) or_return
 
 	popped := make([dynamic]string)
-	iter := list.iterator_tail(l.elements^, List_Element, "node")
+	iter := linked_list.iterator_tail(l.elements^, List_Element, "node")
 	for i := 0; i < count; i += 1 {
-		item, ok := list.iterate_prev(&iter)
+		item, ok := linked_list.iterate_prev(&iter)
 		if !ok {
 			break
 		}
 		append(&popped, item.value)
-		list.pop_back(l.elements)
+		linked_list.pop_back(l.elements)
 	}
 
 	database_set(impl, key, l)
@@ -236,23 +260,67 @@ list_pop_back :: proc(
 	return popped[:], .None
 }
 
-// ====== Generic ===========================
+// ====== Stream ===========================
 
-generic_type :: proc(db: ^Database, key: string) -> (type: string, error: Database_Error) {
+Stream_ID :: struct {
+	ms:  u64,
+	seq: u64,
+}
+
+Stream_Entry :: struct {
+	using node: linked_list.Node,
+	id:         Stream_ID,
+	fields:     map[string]string,
+}
+
+Stream :: struct {
+	expires_at: time.Time,
+	len:        i64,
+	elements:   ^linked_list.List,
+}
+
+@(private)
+stream_init :: proc() -> Stream {
+	s := Stream{}
+	s.elements = new(linked_list.List)
+	return s
+}
+
+stream_add :: proc(
+	db: ^Database,
+	key: string,
+	id: string,
+	fields: map[string]string,
+) -> (
+	error: Database_Error,
+) {
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
-	val := database_get(impl, key) or_return
+	id_parts := strings.split(id, "-")
+	assert(len(id_parts) == 2, "Invalid ID")
+	ms, parse_ok1 := strconv.parse_u64(id_parts[0])
+	seq, parse_ok2 := strconv.parse_u64(id_parts[1])
+	assert(parse_ok1 && parse_ok2, "Invalid ID parts")
 
-
-	switch v in val {
-	case String:
-		type = "string"
-	case List:
-		type = "list"
+	stream_entry := Stream_Entry {
+		id = Stream_ID{ms = ms, seq = seq},
+		fields = fields,
 	}
 
-	return type, .None
+	stream, err := database_typed_get(impl, key, Stream)
+	if err == .Key_Not_Found {
+		stream = stream_init()
+	} else {
+		return err
+	}
+
+	linked_list.push_back(stream.elements, &stream_entry.node)
+	stream.len += 1
+
+	database_set(impl, key, stream) or_return
+
+	return .None
 }
 
 // ====== Database ===========================
@@ -313,11 +381,17 @@ database_destroy :: proc(database: ^Database) {
 }
 
 @(private)
-database_set :: proc(impl: ^Database_Impl, key: string, value: Redis_Value) -> (ok: bool) {
+database_set :: proc(
+	impl: ^Database_Impl,
+	key: string,
+	value: Redis_Value,
+) -> (
+	error: Database_Error,
+) {
 	assert(impl.is_locked)
 	impl.db[key] = value
 
-	return true
+	return .None
 }
 
 @(private)
@@ -356,6 +430,8 @@ database_get :: proc(
 		case String:
 			expires_at = v.expires_at
 		case List:
+			expires_at = v.expires_at
+		case Stream:
 			expires_at = v.expires_at
 		}
 		if expires_at != {} && time.diff(time.now(), expires_at) < 0 {

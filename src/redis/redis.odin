@@ -140,7 +140,7 @@ RPOP :: Command{"RPOP", 2, rpop, {"key", "count"}}
 BLPOP :: Command{"BLPOP", 3, blpop, {"key", "[key ...]", "timeout"}}
 BRPOP :: Command{"BRPOP", 3, brpop, {"key", "[key ...]", "timeout"}}
 TYPE :: Command{"TYPE", 2, type, {"key"}}
-
+XADD :: Command{"XADD", 5, xadd, {"key", "<* | id>", "field", "value", "[field value ...]"}}
 commands_table := map[string]Command {
 	PING.name   = PING,
 	ECHO.name   = ECHO,
@@ -155,6 +155,7 @@ commands_table := map[string]Command {
 	BLPOP.name  = BLPOP,
 	BRPOP.name  = BRPOP,
 	TYPE.name   = TYPE,
+	XADD.name   = XADD,
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -187,7 +188,7 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
 	val := args[2]
 
-	obj := String_Value {
+	obj := String {
 		value = val,
 	}
 
@@ -210,8 +211,8 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 		}
 	}
 
-	set_ok := string_set(conn.server.database, key, obj)
-	if !set_ok {
+	err := string_set(conn.server.database, key, obj)
+	if err != nil {
 		return {}
 	}
 
@@ -344,6 +345,22 @@ type :: proc(conn: ^Connection, args: []string) -> RESP {
 	}
 
 	return RESP_Simple_String{type}
+}
+
+xadd :: proc(conn: ^Connection, args: []string) -> RESP {
+	field_args := args[3:][:]
+	fields := make(map[string]string)
+	for i := 1; i < len(field_args); i += 2 {
+		key := field_args[i - 1]
+		val := field_args[i]
+		fields[key] = val
+	}
+
+	err := stream_add(conn.server.database, args[1], args[2], fields)
+	if err != nil {
+		return RESP_Null_Bulk_String{}
+	}
+	return RESP_Bulk_String{args[2]}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
