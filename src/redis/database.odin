@@ -6,27 +6,27 @@ import "core:sync"
 import "core:time"
 
 Redis_Value :: union {
-	String_Value,
-	List_Value,
+	String,
+	List,
 }
 
 // ====== Strings ===========================
 
-String_Value :: struct {
+String :: struct {
 	expires_at: time.Time,
 	value:      string,
 }
 
-string_set :: proc(db: ^Database, key: string, value: String_Value) -> (ok: bool) {
+string_set :: proc(db: ^Database, key: string, value: String) -> (ok: bool) {
 	impl := database_lock(db)
 	defer database_unlock(impl)
 	return database_set(impl, key, value)
 }
 
-string_get :: proc(db: ^Database, key: string) -> (value: String_Value, error: Database_Error) {
+string_get :: proc(db: ^Database, key: string) -> (value: String, error: Database_Error) {
 	impl := database_lock(db)
 	defer database_unlock(impl)
-	value = database_typed_get(impl, key, String_Value) or_return
+	value = database_typed_get(impl, key, String) or_return
 	return value, .None
 }
 
@@ -38,15 +38,15 @@ List_Element :: struct {
 	value: string,
 }
 
-List_Value :: struct {
+List :: struct {
 	expires_at: time.Time,
 	len:        i64,
 	elements:   ^list.List,
 }
 
 @(private)
-list_init :: proc() -> List_Value {
-	l := List_Value{}
+list_init :: proc() -> List {
+	l := List{}
 	l.elements = new(list.List)
 	return l
 }
@@ -55,14 +55,14 @@ list_length :: proc(db: ^Database, key: string) -> (length: i64, error: Database
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
-	l := database_typed_get(impl, key, List_Value) or_return
+	l := database_typed_get(impl, key, List) or_return
 	return l.len, .None
 }
 
-list_get :: proc(db: ^Database, key: string) -> (list: List_Value, error: Database_Error) {
+list_get :: proc(db: ^Database, key: string) -> (list: List, error: Database_Error) {
 	impl := database_lock(db)
 	defer database_unlock(impl)
-	l := database_typed_get(impl, key, List_Value) or_return
+	l := database_typed_get(impl, key, List) or_return
 	return l, .None
 }
 
@@ -77,7 +77,7 @@ list_range :: proc(
 ) {
 	impl := database_lock(db)
 	defer database_unlock(impl)
-	l := database_typed_get(impl, key, List_Value) or_return
+	l := database_typed_get(impl, key, List) or_return
 
 	elem_count := l.len
 
@@ -137,7 +137,7 @@ list_push_back :: proc(
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
-	l, get_err := database_typed_get(impl, key, List_Value)
+	l, get_err := database_typed_get(impl, key, List)
 	if get_err != nil {
 		l = list_init()
 	}
@@ -163,7 +163,7 @@ list_push_front :: proc(
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
-	l, get_err := database_typed_get(impl, key, List_Value)
+	l, get_err := database_typed_get(impl, key, List)
 	if get_err != nil {
 		l = list_init()
 	}
@@ -189,7 +189,7 @@ list_pop_front :: proc(
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
-	l := database_typed_get(impl, key, List_Value) or_return
+	l := database_typed_get(impl, key, List) or_return
 
 	popped := make([dynamic]string)
 	iter := list.iterator_head(l.elements^, List_Element, "node")
@@ -218,7 +218,7 @@ list_pop_back :: proc(
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
-	l := database_typed_get(impl, key, List_Value) or_return
+	l := database_typed_get(impl, key, List) or_return
 
 	popped := make([dynamic]string)
 	iter := list.iterator_tail(l.elements^, List_Element, "node")
@@ -246,9 +246,9 @@ generic_type :: proc(db: ^Database, key: string) -> (type: string, error: Databa
 
 
 	switch v in val {
-	case String_Value:
+	case String:
 		type = "string"
-	case List_Value:
+	case List:
 		type = "list"
 	}
 
@@ -353,9 +353,9 @@ database_get :: proc(
 	if get_ok {
 		expires_at: time.Time
 		switch v in val {
-		case String_Value:
+		case String:
 			expires_at = v.expires_at
-		case List_Value:
+		case List:
 			expires_at = v.expires_at
 		}
 		if expires_at != {} && time.diff(time.now(), expires_at) < 0 {
