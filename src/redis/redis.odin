@@ -2,10 +2,8 @@
 
 package redis
 
-import "core:container/intrusive/list"
 import "core:container/queue"
 import "core:fmt"
-import "core:math"
 import "core:net"
 import "core:slice"
 import "core:strconv"
@@ -212,7 +210,7 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 		}
 	}
 
-	set_ok := strings_set(conn.server.database, key, obj)
+	set_ok := string_set(conn.server.database, key, obj)
 	if !set_ok {
 		return {}
 	}
@@ -222,7 +220,7 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 
 get :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
-	val, err := strings_get(conn.server.database, key)
+	val, err := string_get(conn.server.database, key)
 	switch err {
 	case .Expired:
 		return RESP_Null_Bulk_String{}
@@ -236,143 +234,58 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 }
 
 rpush :: proc(conn: ^Connection, args: []string) -> RESP {
-//	return gen_push(conn, args, list_push_back)
-	return push(conn, args, list_append)
-}
-
-gen_push :: proc(
-	conn: ^Connection,
-	args: []string,
-	pusher: proc(db: ^Database, key: string, values: ..string) -> (i64, Database_Error),
-) -> RESP {
-	count, _ := pusher(conn.server.database, args[1], ..args[2:])
+	count, _ := list_push_back(conn.server.database, args[1], ..args[2:])
 	return RESP_Integer{count}
 }
 
 lpush :: proc(conn: ^Connection, args: []string) -> RESP {
-	return push(conn, args, list_prepend)
-}
-
-push :: proc(
-	conn: ^Connection,
-	args: []string,
-	pusher: proc(list: ^List_Value, value: string),
-) -> RESP {
-	argc := len(args)
-	key := args[1]
-	values_count := argc - 2
-
-	list_obj, err := database_get_type(conn.server.database, key, List_Value)
-	if err != nil {
-		list_obj = list_init()
-	}
-	for i := 2; i < argc; i += 1 {
-		value := args[i]
-		pusher(&list_obj, value)
-	}
-
-	set_ok := database_set(conn.server.database, key, list_obj)
-	if !set_ok {
-		return {}
-	}
-
-	return RESP_Integer{i64(list_obj.len)}
+	count, _ := list_push_front(conn.server.database, args[1], ..args[2:])
+	return RESP_Integer{count}
 }
 
 lrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
-	start_str := args[2]
-	stop_str := args[3]
-	start, start_ok := strconv.parse_i64(start_str)
-	stop, stop_ok := strconv.parse_i64(stop_str)
+	start, start_ok := strconv.parse_i64(args[2])
+	stop, stop_ok := strconv.parse_i64(args[3])
 
-	list_obj, err := database_get_type(conn.server.database, key, List_Value)
-	if err != nil {
-		return RESP_Array{}
-	}
-
-	elem_count := list_obj.len
-
-	if start > elem_count {
-		return RESP_Array{}
-	}
-	if math.abs(start) > elem_count {
-		start = 0
-	}
-	if start < 0 {
-		start = elem_count + start
+	values, _ := list_range(conn.server.database, key, start, stop)
+	resp := RESP_Array{}
+	resp.elements = make(type_of(resp.elements))
+	for val in values {
+		append(&resp.elements, RESP_Bulk_String{val})
 	}
 
-	if stop > elem_count {
-		stop = elem_count - 1
-	}
-	if math.abs(stop) > elem_count {
-		stop = 0
-	}
-	if stop < 0 {
-		stop = elem_count + stop
-	}
-
-	values := make([dynamic]RESP)
-	//	defer delete(values)
-
-	iter := list.iterator_head(list_obj.elements^, List_Element, "node")
-	i: i64 = 0
-	for elem in list.iterate_next(&iter) {
-		if i < start {
-			i += 1
-			continue
-		}
-		if i > stop {
-			break
-		}
-		append(&values, RESP_Bulk_String{elem.value})
-		i += 1
-	}
-
-	return RESP_Array{values}
+	return resp
 }
 
 llen :: proc(conn: ^Connection, args: []string) -> RESP {
-	key := args[1]
-
-	list, err := database_get_type(conn.server.database, key, List_Value)
-	if err != nil {
-		return RESP_Integer{0}
-	}
-
-	return RESP_Integer{i64(list.len)}
+	length, _ := list_length(conn.server.database, args[1])
+	return RESP_Integer{length}
 }
 
 lpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return pop(LPOP, conn, args, list_pop_front)
+	return gen_pop(conn, args, list_pop_front)
 }
 
 rpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return pop(RPOP, conn, args, list_pop_back)
+	return gen_pop(conn, args, list_pop_back)
 }
 
-pop :: proc(
-	cmd: Command,
+gen_pop :: proc(
 	conn: ^Connection,
 	args: []string,
-	popper: proc(l: ^List_Value, count: int = 1) -> []string,
+	popper: proc(db: ^Database, key: string, count: int = 1) -> ([]string, Database_Error),
 ) -> RESP {
 	key := args[1]
 	count := 1
-	if (len(args) > cmd.min_args) {
+	if len(args) > 2 {
 		c, ok := strconv.parse_int(args[2])
 		if ok {
 			count = c
 		}
 	}
 
-	list, err := database_get_type(conn.server.database, key, List_Value)
-	if err != nil {
-		return RESP_Null_Bulk_String{}
-	}
-
-	popped, set_ok := database_list_pop(conn.server.database, key, &list, count, popper)
+	popped, err := popper(conn.server.database, key, count)
 	if len(popped) == 1 {
 		return RESP_Bulk_String{popped[0]}
 	} else {
@@ -384,23 +297,18 @@ pop :: proc(
 	}
 }
 
-pop_on_set :: proc(value: ^List_Value, count: int, $T: typeid) -> T {
-
-}
-
 blpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return bpop(BLPOP, conn, args, list_pop_front)
+	return bpop(conn, args, list_pop_front)
 }
 
 brpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return bpop(BRPOP, conn, args, list_pop_back)
+	return bpop(conn, args, list_pop_back)
 }
 
 bpop :: proc(
-	cmd: Command,
 	conn: ^Connection,
 	args: []string,
-	popper: proc(l: ^List_Value, count: int = 1) -> []string,
+	popper: proc(db: ^Database, key: string, count: int = 1) -> ([]string, Database_Error),
 ) -> RESP {
 	key := args[1]
 
@@ -414,9 +322,9 @@ bpop :: proc(
 			break
 		}
 
-		list, _ := database_get_type(conn.server.database, key, List_Value)
+		list, _ := list_get(conn.server.database, key)
 		if list.len > 0 {
-			popped, ok := database_list_pop(conn.server.database, key, &list, 1, popper)
+			popped, ok := popper(conn.server.database, key, 1)
 			resp := RESP_Array{}
 			append(&resp.elements, RESP_Bulk_String{key})
 			append(&resp.elements, RESP_Bulk_String{popped[0]})
@@ -430,19 +338,12 @@ bpop :: proc(
 }
 
 type :: proc(conn: ^Connection, args: []string) -> RESP {
-	val, err := database_get(conn.server.database, args[1])
+	type, err := generic_type(conn.server.database, args[1])
 	if err != nil {
 		return RESP_Simple_String{"none"}
 	}
 
-	switch t in val {
-	case String_Value:
-		return RESP_Simple_String{"string"}
-	case List_Value:
-		return RESP_Simple_String{"list"}
-	}
-
-	return RESP_Simple_String{"none"}
+	return RESP_Simple_String{type}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
