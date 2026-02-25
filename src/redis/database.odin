@@ -1,5 +1,6 @@
 package redis
 
+import "base:intrinsics"
 import "core:container/intrusive/list"
 import "core:sync"
 import "core:time"
@@ -9,10 +10,27 @@ Redis_Value :: union {
 	List_Value,
 }
 
+// ====== Strings ===========================
+
 String_Value :: struct {
 	expires_at: time.Time,
 	value:      string,
 }
+
+strings_set :: proc(db: ^Database, key: string, value: String_Value) -> (ok: bool) {
+	impl := database_lock(db)
+	defer database_unlock(impl)
+	return _database_set(impl, key, value)
+}
+
+strings_get :: proc(db: ^Database, key: string) -> (value: String_Value, error: Database_Error) {
+	impl := database_lock(db)
+	defer database_unlock(impl)
+	value = _database_get_type(impl, key, String_Value) or_return
+	return value, .None
+}
+
+// ====== Lists ===========================
 
 @(private)
 List_Element :: struct {
@@ -22,7 +40,7 @@ List_Element :: struct {
 
 List_Value :: struct {
 	expires_at: time.Time,
-	len:        int,
+	len:        i64,
 	elements:   ^list.List,
 }
 
@@ -37,6 +55,29 @@ list_append :: proc(l: ^List_Value, value: string) {
 	item.value = value
 	list.push_back(l.elements, &item.node)
 	l.len += 1
+}
+
+list_push_back :: proc(
+	db: ^Database,
+	key: string,
+	values: ..string,
+) -> (
+	count: i64,
+	error: Database_Error,
+) {
+	impl := database_impl(db)
+	l, get_err := database_get_type(db, key, List_Value)
+	if get_err != nil {
+		return 0, get_err
+	}
+
+	for val in values {
+		elem := new(List_Element)
+		list.push_back(l.elements, &elem.node)
+		l.len += 1
+	}
+	database_set(db, key, l)
+	return l.len, .None
 }
 
 list_prepend :: proc(l: ^List_Value, value: string) {
@@ -78,10 +119,13 @@ list_pop_back :: proc(l: ^List_Value, count: int = 1) -> []string {
 	return popped[:]
 }
 
+// ====== Database ===========================
+
 Database_Impl :: struct {
-	handle: Database,
-	db:     map[string]Redis_Value,
-	lock:   sync.RW_Mutex,
+	handle:    Database,
+	db:        map[string]Redis_Value,
+	lock:      sync.RW_Mutex,
+	is_locked: bool,
 }
 
 Database :: struct {
@@ -90,7 +134,7 @@ Database :: struct {
 
 Database_Error :: enum {
 	None = 0,
-	Not_Found,
+	Key_Not_Found,
 	Mismatch_Type,
 	Expired,
 }
@@ -99,6 +143,18 @@ Database_Error :: enum {
 database_impl :: proc(database: ^Database) -> ^Database_Impl {
 	assert(database != nil && database.impl != nil, "Invalid database pointer")
 	return (^Database_Impl)(database.impl)
+}
+
+database_lock :: proc(db: ^Database) -> ^Database_Impl {
+	impl := database_impl(db)
+	sync.rw_mutex_lock(&impl.lock)
+	impl.is_locked = true
+	return impl
+}
+
+database_unlock :: proc(impl: ^Database_Impl) {
+	sync.rw_mutex_unlock(&impl.lock)
+	impl.is_locked = false
 }
 
 database_init :: proc(capacity: int = 100, allocator := context.allocator) -> ^Database {
@@ -115,15 +171,6 @@ database_destroy :: proc(database: ^Database) {
 	free(db)
 }
 
-strings_set :: proc(db: ^Database, key: string, value: String_Value) -> (ok: bool) {
-	return database_set(db, key, value)
-}
-
-strings_get :: proc(db: ^Database, key: string) -> (value: String_Value, error: Database_Error) {
-	value = database_get_type(db, key, String_Value) or_return
-	return value, .None
-}
-
 database_set :: proc(database: ^Database, key: string, value: Redis_Value) -> (ok: bool) {
 	db := database_impl(database)
 
@@ -133,6 +180,7 @@ database_set :: proc(database: ^Database, key: string, value: Redis_Value) -> (o
 
 	return true
 }
+
 
 database_list_pop :: proc(
 	database: ^Database,
@@ -194,6 +242,60 @@ database_get :: proc(db: ^Database, key: string) -> (value: Redis_Value, error: 
 		return val, .None
 	}
 
-	return {}, .Not_Found
+	return {}, .Key_Not_Found
+}
+
+_database_set :: proc(impl: ^Database_Impl, key: string, value: Redis_Value) -> (ok: bool) {
+	assert(impl.is_locked)
+	impl.db[key] = value
+
+	return true
+}
+
+_database_get_type :: proc(
+	impl: ^Database_Impl,
+	key: string,
+	$T: typeid,
+) -> (
+	value: T,
+	error: Database_Error,
+) {
+	val := _database_get(impl, key) or_return
+
+	v, cast_ok := val.(T)
+	if !cast_ok {
+		return {}, .Mismatch_Type
+	}
+
+	return v, .None
+}
+
+_database_get :: proc(
+	impl: ^Database_Impl,
+	key: string,
+) -> (
+	value: Redis_Value,
+	error: Database_Error,
+) {
+	assert(impl.is_locked)
+	val, get_ok := impl.db[key]
+
+	if get_ok {
+		expires_at: time.Time
+		switch v in val {
+		case String_Value:
+			expires_at = v.expires_at
+		case List_Value:
+			expires_at = v.expires_at
+		}
+		if expires_at != {} && time.diff(time.now(), expires_at) < 0 {
+			// fmt.printfln("Item expired for %s", key)
+			delete_key(&impl.db, key)
+			return {}, .Expired
+		}
+		return val, .None
+	}
+
+	return {}, .Key_Not_Found
 }
 

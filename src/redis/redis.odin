@@ -226,7 +226,7 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 	switch err {
 	case .Expired:
 		return RESP_Null_Bulk_String{}
-	case .Not_Found, .Unexpected_Type:
+	case .Key_Not_Found, .Mismatch_Type:
 		return RESP_Simple_Error{"(error) Key not found"}
 	case .None:
 		return RESP_Bulk_String{val.value}
@@ -236,7 +236,17 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 }
 
 rpush :: proc(conn: ^Connection, args: []string) -> RESP {
+//	return gen_push(conn, args, list_push_back)
 	return push(conn, args, list_append)
+}
+
+gen_push :: proc(
+	conn: ^Connection,
+	args: []string,
+	pusher: proc(db: ^Database, key: string, values: ..string) -> (i64, Database_Error),
+) -> RESP {
+	count, _ := pusher(conn.server.database, args[1], ..args[2:])
+	return RESP_Integer{count}
 }
 
 lpush :: proc(conn: ^Connection, args: []string) -> RESP {
@@ -252,15 +262,10 @@ push :: proc(
 	key := args[1]
 	values_count := argc - 2
 
-	list_obj: List_Value
-
-	if existing_obj, err := database_get_type(conn.server.database, key, List_Value);
-	   err == .None {
-		list_obj = existing_obj
-	} else {
+	list_obj, err := database_get_type(conn.server.database, key, List_Value)
+	if err != nil {
 		list_obj = list_init()
 	}
-
 	for i := 2; i < argc; i += 1 {
 		value := args[i]
 		pusher(&list_obj, value)
@@ -278,8 +283,8 @@ lrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	key := args[1]
 	start_str := args[2]
 	stop_str := args[3]
-	start, start_ok := strconv.parse_int(start_str)
-	stop, stop_ok := strconv.parse_int(stop_str)
+	start, start_ok := strconv.parse_i64(start_str)
+	stop, stop_ok := strconv.parse_i64(stop_str)
 
 	list_obj, err := database_get_type(conn.server.database, key, List_Value)
 	if err != nil {
@@ -312,7 +317,7 @@ lrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	//	defer delete(values)
 
 	iter := list.iterator_head(list_obj.elements^, List_Element, "node")
-	i := 0
+	i: i64 = 0
 	for elem in list.iterate_next(&iter) {
 		if i < start {
 			i += 1
