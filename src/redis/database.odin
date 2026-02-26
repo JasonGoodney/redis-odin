@@ -288,6 +288,10 @@ Stream_ID :: struct {
 	seq: u64,
 }
 
+Stream_ID_None :: Stream_ID{}
+Stream_ID_Min :: Stream_ID{0, 1}
+Stream_ID_Max :: Stream_ID{max(u64), max(u64)}
+
 Stream_Entry :: struct {
 	using node: linked_list.Node,
 	id:         Stream_ID,
@@ -357,8 +361,8 @@ stream_add :: proc(
 stream_range :: proc(
 	db: ^Database,
 	key: string,
-	start_id_arg: string,
-	end_id_arg: string,
+	start: string,
+	end: string,
 ) -> (
 	entries: []Stream_Entry,
 	err: Stream_Error,
@@ -372,14 +376,12 @@ stream_range :: proc(
 	} else if get_err != nil {
 		return {}, err
 	}
-	start_ms, start_seq, start_ok := _stream_range_parse_id(start_id_arg, 0)
-	end_ms, end_seq, end_ok := _stream_range_parse_id(end_id_arg, max(u64))
-	if !start_ok || !end_ok {
-		return {}, .Invalid_Args
-	}
 
-	start_id := Stream_ID{start_ms, start_seq}
-	end_id := Stream_ID{end_ms, end_seq}
+	start_id, start_ok := _stream_range_parse_id(start, 0)
+	end_id, end_ok := _stream_range_parse_id(end, max(u64))
+	if !start_ok || !end_ok {
+		return {}, .ID_Invalid_Form
+	}
 
 	_entries := make([dynamic]Stream_Entry)
 
@@ -413,21 +415,27 @@ _stream_id_compare :: proc(lhs: Stream_ID, rhs: Stream_ID) -> int {
 	}
 }
 
-_stream_range_parse_id :: proc(id: string, default_seq: u64) -> (ms: u64, seq: u64, ok: bool) {
+_stream_range_parse_id :: proc(id_arg: string, default_seq: u64) -> (id: Stream_ID, ok: bool) {
+	if 0 == strings.compare(id_arg, "-") {
+		return Stream_ID_Min, true
+	} else if 0 == strings.compare(id_arg, "+") {
+		return Stream_ID_Max, true
+	}
 
-	parts := strings.split(id, "-")
+	parts := strings.split(id_arg, "-")
 	_ms, ms_ok := strconv.parse_u64(parts[0])
+
 	if !ms_ok {
-		return 0, 0, false
+		return Stream_ID_None, false
 	}
 	if len(parts) == 1 {
-		return _ms, default_seq, true
+		return {_ms, default_seq}, true
 	}
 	_seq, seq_ok := strconv.parse_u64(parts[1])
 	if !seq_ok {
-		return 0, 0, false
+		return Stream_ID_None, false
 	}
-	return _ms, _seq, true
+	return {_ms, _seq}, true
 }
 
 _parse_stream_id :: proc(
