@@ -127,35 +127,27 @@ Command :: struct {
 	arguments: []string,
 }
 
-PING :: Command{"PING", 1, ping, {"[message]"}}
-ECHO :: Command{"ECHO", 2, echo, {"message"}}
-SET :: Command{"SET", 3, set, {"key", "value", "[options]"}}
-GET :: Command{"GET", 2, get, {"get"}}
-RPUSH :: Command{"RPUSH", 3, rpush, {"key", "element", "[element ...]"}}
-LPUSH :: Command{"LPUSH", 3, lpush, {"key", "element", "[element ...]"}}
-LRANGE :: Command{"LRANGE", 4, lrange, {"key", "start", "stop"}}
-LLEN :: Command{"LLEN", 2, llen, {"key"}}
-LPOP :: Command{"LPOP", 2, lpop, {"key", "[count]"}}
-RPOP :: Command{"RPOP", 2, rpop, {"key", "count"}}
-BLPOP :: Command{"BLPOP", 3, blpop, {"key", "[key ...]", "timeout"}}
-BRPOP :: Command{"BRPOP", 3, brpop, {"key", "[key ...]", "timeout"}}
-TYPE :: Command{"TYPE", 2, type, {"key"}}
-XADD :: Command{"XADD", 5, xadd, {"key", "<* | id>", "field", "value", "[field value ...]"}}
 commands_table := map[string]Command {
-	PING.name   = PING,
-	ECHO.name   = ECHO,
-	SET.name    = SET,
-	GET.name    = GET,
-	RPUSH.name  = RPUSH,
-	LPUSH.name  = LPUSH,
-	LRANGE.name = LRANGE,
-	LLEN.name   = LLEN,
-	LPOP.name   = LPOP,
-	RPOP.name   = RPOP,
-	BLPOP.name  = BLPOP,
-	BRPOP.name  = BRPOP,
-	TYPE.name   = TYPE,
-	XADD.name   = XADD,
+	"PING"   = Command{"PING", 1, ping, {"[message]"}},
+	"ECHO"   = Command{"ECHO", 2, echo, {"message"}},
+	"SET"    = Command{"SET", 3, set, {"key", "value", "[options]"}},
+	"GET"    = Command{"GET", 2, get, {"get"}},
+	"RPUSH"  = Command{"RPUSH", 3, rpush, {"key", "element", "[element ...]"}},
+	"LPUSH"  = Command{"LPUSH", 3, lpush, {"key", "element", "[element ...]"}},
+	"LRANGE" = Command{"LRANGE", 4, lrange, {"key", "start", "stop"}},
+	"LLEN"   = Command{"LLEN", 2, llen, {"key"}},
+	"LPOP"   = Command{"LPOP", 2, lpop, {"key", "[count]"}},
+	"RPOP"   = Command{"RPOP", 2, rpop, {"key", "count"}},
+	"BLPOP"  = Command{"BLPOP", 3, blpop, {"key", "[key ...]", "timeout"}},
+	"BRPOP"  = Command{"BRPOP", 3, brpop, {"key", "[key ...]", "timeout"}},
+	"TYPE"   = Command{"TYPE", 2, type, {"key"}},
+	"XADD"   = Command {
+		"XADD",
+		5,
+		xadd,
+		{"key", "<* | id>", "field", "value", "[field value ...]"},
+	},
+	"XRANGE" = Command{"XRANGE", 4, xrange, {"key", "start", "end", "[COUNT count]"}},
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -361,6 +353,36 @@ xadd :: proc(conn: ^Connection, args: []string) -> RESP {
 		return RESP_Simple_Error{error_string(err)}
 	}
 	return RESP_Bulk_String{stream_entry_id_string(entry.id)}
+}
+
+xrange :: proc(conn: ^Connection, args: []string) -> RESP {
+	entries, err := stream_range(conn.server.database, args[1], args[2], args[3])
+	if err != nil {
+		return RESP_Null_Array{}
+	}
+
+	result := RESP_Array{}
+	result.elements = make(type_of(result.elements))
+
+	for entry in entries {
+		entry_arr := RESP_Array{}
+		entry_arr.elements = make(type_of(entry_arr.elements))
+		id := stream_entry_id_string(entry.id)
+		append(&entry_arr.elements, RESP_Bulk_String{id})
+
+		fields_arr := RESP_Array{}
+		fields_arr.elements = make(type_of(fields_arr.elements))
+		for k, v in entry.fields {
+			append(&fields_arr.elements, RESP_Bulk_String{k})
+			append(&fields_arr.elements, RESP_Bulk_String{v})
+		}
+
+		append(&entry_arr.elements, fields_arr)
+		append(&result.elements, entry_arr)
+	}
+
+
+	return result
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {

@@ -1,6 +1,7 @@
 package redis
 
 import linked_list "core:container/intrusive/list"
+import "core:container/priority_queue"
 import "core:fmt"
 import "core:math"
 import "core:strconv"
@@ -328,9 +329,6 @@ stream_add :: proc(
 	entry: ^Stream_Entry,
 	err: Redis_Error,
 ) {
-	if fields == nil {
-		return {}, .Invalid_Args
-	}
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
@@ -360,6 +358,82 @@ stream_add :: proc(
 	database_set(impl, key, stream) or_return
 
 	return entry, Stream_Error.None
+}
+
+stream_range :: proc(
+	db: ^Database,
+	key: string,
+	start_id_arg: string,
+	end_id_arg: string,
+) -> (
+	entries: []Stream_Entry,
+	err: Stream_Error,
+) {
+	impl := database_lock(db)
+	defer database_unlock(impl)
+
+	stream, get_err := database_typed_get(impl, key, Stream)
+	if get_err == .Key_Not_Found {
+		stream = stream_init()
+	} else if get_err != nil {
+		return {}, err
+	}
+	start_ms, start_seq, start_ok := _stream_range_parse_id(start_id_arg, 0)
+	end_ms, end_seq, end_ok := _stream_range_parse_id(end_id_arg, max(u64))
+	if !start_ok || !end_ok {
+		return {}, .Invalid_Args
+	}
+
+	start_id := Stream_ID{start_ms, start_seq}
+	end_id := Stream_ID{end_ms, end_seq}
+
+	_entries := make([dynamic]Stream_Entry)
+
+	iter := linked_list.iterator_head(stream.elements^, Stream_Entry, "node")
+	for elem in linked_list.iterate_next(&iter) {
+		if -1 == _stream_id_compare(start_id, elem.id) {
+			continue
+		}
+		if 1 == _stream_id_compare(end_id, elem.id) {
+			break
+		}
+
+		append(&_entries, elem^)
+	}
+	return _entries[:], .None
+}
+
+_stream_id_compare :: proc(lhs: Stream_ID, rhs: Stream_ID) -> int {
+	if lhs.ms == rhs.ms {
+		if lhs.seq == rhs.seq {
+			return 0
+		} else if lhs.seq > rhs.seq {
+			return -1
+		} else {
+			return 1
+		}
+	} else if lhs.ms > rhs.ms {
+		return -1
+	} else {
+		return 1
+	}
+}
+
+_stream_range_parse_id :: proc(id: string, default_seq: u64) -> (ms: u64, seq: u64, ok: bool) {
+
+	parts := strings.split(id, "-")
+	_ms, ms_ok := strconv.parse_u64(parts[0])
+	if !ms_ok {
+		return 0, 0, false
+	}
+	if len(parts) == 1 {
+		return _ms, default_seq, true
+	}
+	_seq, seq_ok := strconv.parse_u64(parts[1])
+	if !seq_ok {
+		return 0, 0, false
+	}
+	return _ms, _seq, true
 }
 
 _parse_stream_id :: proc(
