@@ -11,14 +11,19 @@ import "core:time"
 Redis_Error :: union #shared_nil {
 	Database_Error,
 	Stream_Error,
+	Parse_ID_Error,
 }
 
 Stream_Error :: enum {
 	None = 0,
+	Invalid_Args,
+}
+
+Parse_ID_Error :: enum {
+	None = 0,
 	ID_Invalid_Form,
 	ID_Seq_Zero,
 	ID_Seq_Below_Top,
-	Invalid_Args,
 }
 
 Database_Error :: enum {
@@ -329,11 +334,6 @@ stream_add :: proc(
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
-	id_parts := strings.split(id, "-")
-	if len(id_parts) != 2 {
-		return {}, .ID_Invalid_Form
-	}
-
 	stream, get_err := database_typed_get(impl, key, Stream)
 	if get_err == .Key_Not_Found {
 		stream = stream_init()
@@ -348,10 +348,10 @@ stream_add :: proc(
 		last_entry_id = last_entry.id
 	}
 
-	entry_id := stream_next_entry_id(id, last_entry_id) or_return
-	fmt.printfln("entry id: %v", entry_id)
+	ms, seq := _parse_stream_id(id, last_entry_id.ms, last_entry_id.seq) or_return
+	fmt.printfln("entry id: %d-%d", ms, seq)
 	entry = stream_entry_init()
-	entry.id = entry_id
+	entry.id = {ms, seq}
 	entry.fields = fields
 
 	linked_list.push_back(stream.elements, &entry.node)
@@ -362,53 +362,89 @@ stream_add :: proc(
 	return entry, Stream_Error.None
 }
 
-stream_next_entry_id :: proc(
+_parse_stream_id :: proc(
 	id_arg: string,
-	prev_id: Stream_ID,
+	prev_ms: u64,
+	prev_seq: u64,
 ) -> (
-	id: Stream_ID,
-	err: Stream_Error,
+	ms: u64,
+	seq: u64,
+	err: Parse_ID_Error,
 ) {
 	if 0 == strings.compare(id_arg, "*") {
-		return {}, .Invalid_Args
-	}
-	if 0 == strings.compare(id_arg, "0-0") {
-		return {}, .ID_Seq_Zero
+		return _parse_stream_id_auto_gen(prev_ms, prev_seq)
 	}
 
 	parts := strings.split(id_arg, "-")
 	defer delete(parts)
-	if 2 != len(parts) {
-		return {}, .ID_Invalid_Form
+	if len(parts) != 2 {
+		return 0, 0, .ID_Invalid_Form
 	}
 
-	ms, ms_ok := strconv.parse_u64(parts[0])
-	seq, seq_ok := strconv.parse_u64(parts[1])
+	_ms, ms_ok := strconv.parse_u64(parts[0])
+	_seq, seq_ok := strconv.parse_u64(parts[1])
 
 	if !ms_ok {
-		return {}, .ID_Invalid_Form
-	} else if ms < prev_id.ms {
-		return {}, .ID_Seq_Below_Top
+		return 0, 0, .ID_Invalid_Form
 	}
 
 	if !seq_ok {
 		if 0 == strings.compare(parts[1], "*") {
-			if ms > prev_id.ms {
-				seq = 0
-			} else {
-				seq = prev_id.seq + 1
-			}
+			return _parse_stream_id_seq_auto_gen(_ms, prev_ms, prev_seq)
 		} else {
-			return {}, .ID_Invalid_Form
+			return 0, 0, .ID_Invalid_Form
 		}
-	} else if seq == 0 {
-		return {}, .ID_Seq_Zero
-	} else if ms == prev_id.ms && seq <= prev_id.seq {
-		return {}, .ID_Seq_Below_Top
 	}
 
-	return {ms, seq}, .None
+	return _parse_stream_id_explicit(_ms, _seq, prev_ms, prev_seq)
+}
 
+_parse_stream_id_auto_gen :: proc(prev_ms: u64, prev_seq: u64) -> (u64, u64, Parse_ID_Error) {
+	now := time.now()
+	ns := time.to_unix_nanoseconds(now)
+	dur := time.Duration(ns)
+	msf := time.duration_milliseconds(dur)
+	ms := u64(msf)
+
+	return _parse_stream_id_seq_auto_gen(ms, prev_ms, prev_seq)
+}
+_parse_stream_id_seq_auto_gen :: proc(
+	ms: u64,
+	prev_ms: u64,
+	prev_seq: u64,
+) -> (
+	u64,
+	u64,
+	Parse_ID_Error,
+) {
+	if ms > prev_ms {
+		return ms, 0, .None
+	}
+	return _parse_stream_id_explicit(ms, prev_seq + 1, prev_ms, prev_seq)
+}
+_parse_stream_id_explicit :: proc(
+	ms: u64,
+	seq: u64,
+	prev_ms: u64,
+	prev_seq: u64,
+) -> (
+	u64,
+	u64,
+	Parse_ID_Error,
+) {
+	if ms == 0 && seq == 0 {
+		return 0, 0, .ID_Seq_Zero
+	}
+	if ms > prev_ms {
+		return ms, seq, .None
+	} else if ms == prev_ms {
+		if seq <= prev_seq {
+			return 0, 0, .ID_Seq_Below_Top
+		}
+		return ms, seq, .None
+	} else {
+		return 0, 0, .ID_Seq_Below_Top
+	}
 }
 
 stream_entry_id_string :: proc(id: Stream_ID) -> string {
@@ -540,14 +576,6 @@ error_string :: proc(err: Redis_Error) -> string {
 		switch e {
 		case .None:
 			return ""
-		case .ID_Invalid_Form:
-			return "ERR The ID specified in XADD must be in the form <ms-seq>"
-		case .ID_Seq_Zero:
-			return "ERR The ID specified in XADD must be greater than 0-0"
-		case .ID_Seq_Below_Top:
-			return(
-				"ERR The ID specified in XADD is equal or smaller than the target stream top item" \
-			)
 		case .Invalid_Args:
 			return ""
 
@@ -562,6 +590,19 @@ error_string :: proc(err: Redis_Error) -> string {
 			return ""
 		case .Expired:
 			return "ERR Key expired"
+		}
+	case Parse_ID_Error:
+		switch e {
+		case .None:
+			return ""
+		case .ID_Invalid_Form:
+			return "ERR The ID specified in XADD must be in the form <ms-seq>"
+		case .ID_Seq_Zero:
+			return "ERR The ID specified in XADD must be greater than 0-0"
+		case .ID_Seq_Below_Top:
+			return(
+				"ERR The ID specified in XADD is equal or smaller than the target stream top item" \
+			)
 		}
 	}
 
