@@ -1,7 +1,6 @@
 package redis
 
 import linked_list "core:container/intrusive/list"
-import "core:container/priority_queue"
 import "core:fmt"
 import "core:math"
 import "core:strconv"
@@ -12,16 +11,11 @@ import "core:time"
 Redis_Error :: union #shared_nil {
 	Database_Error,
 	Stream_Error,
-	Parse_ID_Error,
 }
 
 Stream_Error :: enum {
 	None = 0,
 	Invalid_Args,
-}
-
-Parse_ID_Error :: enum {
-	None = 0,
 	ID_Invalid_Form,
 	ID_Seq_Zero,
 	ID_Seq_Below_Top,
@@ -443,7 +437,7 @@ _parse_stream_id :: proc(
 ) -> (
 	ms: u64,
 	seq: u64,
-	err: Parse_ID_Error,
+	err: Stream_Error,
 ) {
 	if 0 == strings.compare(id_arg, "*") {
 		return _parse_stream_id_auto_gen(prev_ms, prev_seq)
@@ -473,7 +467,7 @@ _parse_stream_id :: proc(
 	return _parse_stream_id_explicit(_ms, _seq, prev_ms, prev_seq)
 }
 
-_parse_stream_id_auto_gen :: proc(prev_ms: u64, prev_seq: u64) -> (u64, u64, Parse_ID_Error) {
+_parse_stream_id_auto_gen :: proc(prev_ms: u64, prev_seq: u64) -> (u64, u64, Stream_Error) {
 	now := time.now()
 	ns := time.to_unix_nanoseconds(now)
 	dur := time.Duration(ns)
@@ -489,7 +483,7 @@ _parse_stream_id_seq_auto_gen :: proc(
 ) -> (
 	u64,
 	u64,
-	Parse_ID_Error,
+	Stream_Error,
 ) {
 	if ms > prev_ms {
 		return ms, 0, .None
@@ -504,7 +498,7 @@ _parse_stream_id_explicit :: proc(
 ) -> (
 	u64,
 	u64,
-	Parse_ID_Error,
+	Stream_Error,
 ) {
 	if ms == 0 && seq == 0 {
 		return 0, 0, .ID_Seq_Zero
@@ -652,7 +646,14 @@ error_string :: proc(err: Redis_Error) -> string {
 			return ""
 		case .Invalid_Args:
 			return ""
-
+		case .ID_Invalid_Form:
+			return "ERR The ID specified in XADD must be in the form <ms-seq>"
+		case .ID_Seq_Zero:
+			return "ERR The ID specified in XADD must be greater than 0-0"
+		case .ID_Seq_Below_Top:
+			return(
+				"ERR The ID specified in XADD is equal or smaller than the target stream top item" \
+			)
 		}
 	case Database_Error:
 		switch e {
@@ -664,19 +665,6 @@ error_string :: proc(err: Redis_Error) -> string {
 			return ""
 		case .Expired:
 			return "ERR Key expired"
-		}
-	case Parse_ID_Error:
-		switch e {
-		case .None:
-			return ""
-		case .ID_Invalid_Form:
-			return "ERR The ID specified in XADD must be in the form <ms-seq>"
-		case .ID_Seq_Zero:
-			return "ERR The ID specified in XADD must be greater than 0-0"
-		case .ID_Seq_Below_Top:
-			return(
-				"ERR The ID specified in XADD is equal or smaller than the target stream top item" \
-			)
 		}
 	}
 
