@@ -320,24 +320,25 @@ stream_add :: proc(
 	id: string,
 	fields: map[string]string,
 ) -> (
+	entry: ^Stream_Entry,
 	err: Redis_Error,
 ) {
 	if fields == nil {
-		return .Invalid_Args
+		return {}, .Invalid_Args
 	}
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
 	id_parts := strings.split(id, "-")
 	if len(id_parts) != 2 {
-		return .ID_Invalid_Form
+		return {}, .ID_Invalid_Form
 	}
 
 	stream, get_err := database_typed_get(impl, key, Stream)
 	if get_err == .Key_Not_Found {
 		stream = stream_init()
 	} else if get_err != nil {
-		return err
+		return {}, err
 	}
 
 	iter := linked_list.iterator_tail(stream.elements^, Stream_Entry, "node")
@@ -348,7 +349,8 @@ stream_add :: proc(
 	}
 
 	entry_id := stream_next_entry_id(id, last_entry_id) or_return
-	entry := stream_entry_init()
+	fmt.printfln("entry id: %v", entry_id)
+	entry = stream_entry_init()
 	entry.id = entry_id
 	entry.fields = fields
 
@@ -357,7 +359,7 @@ stream_add :: proc(
 
 	database_set(impl, key, stream) or_return
 
-	return Stream_Error.None
+	return entry, Stream_Error.None
 }
 
 stream_next_entry_id :: proc(
@@ -365,10 +367,13 @@ stream_next_entry_id :: proc(
 	prev_id: Stream_ID,
 ) -> (
 	id: Stream_ID,
-	err: Redis_Error,
+	err: Stream_Error,
 ) {
 	if 0 == strings.compare(id_arg, "*") {
-		return {}, Stream_Error.Invalid_Args
+		return {}, .Invalid_Args
+	}
+	if 0 == strings.compare(id_arg, "0-0") {
+		return {}, .ID_Seq_Zero
 	}
 
 	parts := strings.split(id_arg, "-")
@@ -380,21 +385,34 @@ stream_next_entry_id :: proc(
 	ms, ms_ok := strconv.parse_u64(parts[0])
 	seq, seq_ok := strconv.parse_u64(parts[1])
 
-	if !ms_ok || !seq_ok {
+	if !ms_ok {
 		return {}, .ID_Invalid_Form
+	} else if ms < prev_id.ms {
+		return {}, .ID_Seq_Below_Top
 	}
-	if ms == 0 && seq == 0 {
+
+	if !seq_ok {
+		if 0 == strings.compare(parts[1], "*") {
+			if ms > prev_id.ms {
+				seq = 0
+			} else {
+				seq = prev_id.seq + 1
+			}
+		} else {
+			return {}, .ID_Invalid_Form
+		}
+	} else if seq == 0 {
 		return {}, .ID_Seq_Zero
-	}
-	if ms < prev_id.ms {
-		return {}, .ID_Seq_Below_Top
-	}
-	if ms == prev_id.ms && seq <= prev_id.seq {
+	} else if ms == prev_id.ms && seq <= prev_id.seq {
 		return {}, .ID_Seq_Below_Top
 	}
 
-	return {ms, seq}, Stream_Error.None
+	return {ms, seq}, .None
 
+}
+
+stream_entry_id_string :: proc(id: Stream_ID) -> string {
+	return fmt.tprintf("%d-%d", id.ms, id.seq)
 }
 
 // ====== Database ===========================

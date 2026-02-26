@@ -356,11 +356,11 @@ xadd :: proc(conn: ^Connection, args: []string) -> RESP {
 		fields[key] = val
 	}
 
-	err := stream_add(conn.server.database, args[1], args[2], fields)
+	entry, err := stream_add(conn.server.database, args[1], args[2], fields)
 	if err != nil {
 		return RESP_Simple_Error{error_string(err)}
 	}
-	return RESP_Bulk_String{args[2]}
+	return RESP_Bulk_String{stream_entry_id_string(entry.id)}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
