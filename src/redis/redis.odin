@@ -358,7 +358,7 @@ xadd :: proc(conn: ^Connection, args: []string) -> RESP {
 
 	err := stream_add(conn.server.database, args[1], args[2], fields)
 	if err != nil {
-		return RESP_Null_Bulk_String{}
+		return RESP_Simple_Error{error_string(err)}
 	}
 	return RESP_Bulk_String{args[2]}
 }

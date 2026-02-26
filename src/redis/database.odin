@@ -1,11 +1,32 @@
 package redis
 
 import linked_list "core:container/intrusive/list"
+import "core:fmt"
 import "core:math"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:time"
+
+Redis_Error :: union #shared_nil {
+	Database_Error,
+	Stream_Error,
+}
+
+Stream_Error :: enum {
+	None = 0,
+	ID_Invalid_Form,
+	ID_Seq_Zero,
+	ID_Seq_Below_Top,
+	Invalid_Args,
+}
+
+Database_Error :: enum {
+	None = 0,
+	Key_Not_Found,
+	Mismatch_Type,
+	Expired,
+}
 
 Redis_Value :: union {
 	String,
@@ -286,41 +307,94 @@ stream_init :: proc() -> Stream {
 	return s
 }
 
+@(private)
+stream_entry_init :: proc() -> ^Stream_Entry {
+	s := new(Stream_Entry)
+	s.fields = make(type_of(s.fields))
+	return s
+}
+
 stream_add :: proc(
 	db: ^Database,
 	key: string,
 	id: string,
 	fields: map[string]string,
 ) -> (
-	error: Database_Error,
+	err: Redis_Error,
 ) {
+	if fields == nil {
+		return .Invalid_Args
+	}
 	impl := database_lock(db)
 	defer database_unlock(impl)
 
 	id_parts := strings.split(id, "-")
-	assert(len(id_parts) == 2, "Invalid ID")
-	ms, parse_ok1 := strconv.parse_u64(id_parts[0])
-	seq, parse_ok2 := strconv.parse_u64(id_parts[1])
-	assert(parse_ok1 && parse_ok2, "Invalid ID parts")
-
-	stream_entry := Stream_Entry {
-		id = Stream_ID{ms = ms, seq = seq},
-		fields = fields,
+	if len(id_parts) != 2 {
+		return .ID_Invalid_Form
 	}
 
-	stream, err := database_typed_get(impl, key, Stream)
-	if err == .Key_Not_Found {
+	stream, get_err := database_typed_get(impl, key, Stream)
+	if get_err == .Key_Not_Found {
 		stream = stream_init()
-	} else {
+	} else if get_err != nil {
 		return err
 	}
 
-	linked_list.push_back(stream.elements, &stream_entry.node)
+	iter := linked_list.iterator_tail(stream.elements^, Stream_Entry, "node")
+	last_entry, iter_ok := linked_list.iterate_prev(&iter)
+	last_entry_id: Stream_ID
+	if iter_ok {
+		last_entry_id = last_entry.id
+	}
+
+	entry_id := stream_next_entry_id(id, last_entry_id) or_return
+	entry := stream_entry_init()
+	entry.id = entry_id
+	entry.fields = fields
+
+	linked_list.push_back(stream.elements, &entry.node)
 	stream.len += 1
 
 	database_set(impl, key, stream) or_return
 
-	return .None
+	return Stream_Error.None
+}
+
+stream_next_entry_id :: proc(
+	id_arg: string,
+	prev_id: Stream_ID,
+) -> (
+	id: Stream_ID,
+	err: Redis_Error,
+) {
+	if 0 == strings.compare(id_arg, "*") {
+		return {}, Stream_Error.Invalid_Args
+	}
+
+	parts := strings.split(id_arg, "-")
+	defer delete(parts)
+	if 2 != len(parts) {
+		return {}, .ID_Invalid_Form
+	}
+
+	ms, ms_ok := strconv.parse_u64(parts[0])
+	seq, seq_ok := strconv.parse_u64(parts[1])
+
+	if !ms_ok || !seq_ok {
+		return {}, .ID_Invalid_Form
+	}
+	if ms == 0 && seq == 0 {
+		return {}, .ID_Seq_Zero
+	}
+	if ms < prev_id.ms {
+		return {}, .ID_Seq_Below_Top
+	}
+	if ms == prev_id.ms && seq <= prev_id.seq {
+		return {}, .ID_Seq_Below_Top
+	}
+
+	return {ms, seq}, Stream_Error.None
+
 }
 
 // ====== Database ===========================
@@ -335,13 +409,6 @@ Database_Impl :: struct {
 
 Database :: struct {
 	impl: rawptr,
-}
-
-Database_Error :: enum {
-	None = 0,
-	Key_Not_Found,
-	Mismatch_Type,
-	Expired,
 }
 
 database_init :: proc(capacity: int = 100, allocator := context.allocator) -> ^Database {
@@ -435,7 +502,7 @@ database_get :: proc(
 			expires_at = v.expires_at
 		}
 		if expires_at != {} && time.diff(time.now(), expires_at) < 0 {
-			// fmt.printfln("Item expired for %s", key)
+			fmt.printfln("Item expired for %s", key)
 			delete_key(&impl.db, key)
 			return {}, .Expired
 		}
@@ -443,5 +510,43 @@ database_get :: proc(
 	}
 
 	return {}, .Key_Not_Found
+}
+
+error_string :: proc(err: Redis_Error) -> string {
+	if err == nil {
+		return ""
+	}
+
+	switch e in err {
+	case Stream_Error:
+		switch e {
+		case .None:
+			return ""
+		case .ID_Invalid_Form:
+			return "ERR The ID specified in XADD must be in the form <ms-seq>"
+		case .ID_Seq_Zero:
+			return "ERR The ID specified in XADD must be greater than 0-0"
+		case .ID_Seq_Below_Top:
+			return(
+				"ERR The ID specified in XADD is equal or smaller than the target stream top item" \
+			)
+		case .Invalid_Args:
+			return ""
+
+		}
+	case Database_Error:
+		switch e {
+		case .None:
+			return ""
+		case .Key_Not_Found:
+			return "ERR Key not found"
+		case .Mismatch_Type:
+			return ""
+		case .Expired:
+			return "ERR Key expired"
+		}
+	}
+
+	return "unknown error"
 }
 
