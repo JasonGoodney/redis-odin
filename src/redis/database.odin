@@ -399,6 +399,42 @@ stream_range :: proc(
 	return _entries[:], .None
 }
 
+stream_read :: proc(
+	db: ^Database,
+	key: string,
+	id: string,
+) -> (
+	entries: []Stream_Entry,
+	err: Stream_Error,
+) {
+	impl := database_lock(db)
+	defer database_unlock(impl)
+
+	stream, get_err := database_typed_get(impl, key, Stream)
+	if get_err == .Key_Not_Found {
+		stream = stream_init()
+	} else if get_err != nil {
+		return {}, err
+	}
+
+	start_id, start_ok := _stream_range_parse_id(id, 0)
+	if !start_ok {
+		return {}, .ID_Invalid_Form
+	}
+
+	_entries := make([dynamic]Stream_Entry)
+
+	iter := linked_list.iterator_head(stream.elements^, Stream_Entry, "node")
+	for elem in linked_list.iterate_next(&iter) {
+		if -1 <= _stream_id_compare(start_id, elem.id) {
+			continue
+		}
+
+		append(&_entries, elem^)
+	}
+	return _entries[:], .None
+}
+
 _stream_id_compare :: proc(lhs: Stream_ID, rhs: Stream_ID) -> int {
 	if lhs.ms == rhs.ms {
 		if lhs.seq == rhs.seq {

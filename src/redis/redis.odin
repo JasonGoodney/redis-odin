@@ -148,6 +148,7 @@ commands_table := map[string]Command {
 		{"key", "<* | id>", "field", "value", "[field value ...]"},
 	},
 	"XRANGE" = Command{"XRANGE", 4, xrange, {"key", "start", "end", "[COUNT count]"}},
+	"XREAD"  = Command{"XREAD", 4, xread, {"STREAMS", "key", "id"}},
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -357,6 +358,36 @@ xadd :: proc(conn: ^Connection, args: []string) -> RESP {
 
 xrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	entries, err := stream_range(conn.server.database, args[1], args[2], args[3])
+	if err != nil {
+		return RESP_Null_Array{}
+	}
+
+	result := RESP_Array{}
+	result.elements = make(type_of(result.elements))
+
+	for entry in entries {
+		entry_arr := RESP_Array{}
+		entry_arr.elements = make(type_of(entry_arr.elements))
+		id := stream_entry_id_string(entry.id)
+		append(&entry_arr.elements, RESP_Bulk_String{id})
+
+		fields_arr := RESP_Array{}
+		fields_arr.elements = make(type_of(fields_arr.elements))
+		for k, v in entry.fields {
+			append(&fields_arr.elements, RESP_Bulk_String{k})
+			append(&fields_arr.elements, RESP_Bulk_String{v})
+		}
+
+		append(&entry_arr.elements, fields_arr)
+		append(&result.elements, entry_arr)
+	}
+
+
+	return result
+}
+
+xread :: proc(conn: ^Connection, args: []string) -> RESP {
+	entries, err := stream_read(conn.server.database, args[1], args[2])
 	if err != nil {
 		return RESP_Null_Array{}
 	}
