@@ -437,7 +437,7 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 
 		stream_arr := RESP_Array{}
 		stream_arr.elements = make(type_of(stream_arr.elements))
-		append(&stream_arr.elements, RESP_Bulk_String{args[2]})
+		append(&stream_arr.elements, RESP_Bulk_String{args[keys_index + i]})
 
 		entries_arr := RESP_Array{}
 		entries_arr.elements = make(type_of(entries_arr.elements))
