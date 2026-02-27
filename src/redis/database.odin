@@ -387,10 +387,10 @@ stream_range :: proc(
 
 	iter := linked_list.iterator_head(stream.elements^, Stream_Entry, "node")
 	for elem in linked_list.iterate_next(&iter) {
-		if -1 == _stream_id_compare(start_id, elem.id) {
+		if .Greater == _stream_id_compare(start_id, elem.id) {
 			continue
 		}
-		if 1 == _stream_id_compare(end_id, elem.id) {
+		if .Less == _stream_id_compare(end_id, elem.id) {
 			break
 		}
 
@@ -426,7 +426,8 @@ stream_read :: proc(
 
 	iter := linked_list.iterator_head(stream.elements^, Stream_Entry, "node")
 	for elem in linked_list.iterate_next(&iter) {
-		if -1 <= _stream_id_compare(start_id, elem.id) {
+		lhs := _stream_id_compare(start_id, elem.id)
+		if lhs == .Greater {
 			continue
 		}
 
@@ -435,19 +436,26 @@ stream_read :: proc(
 	return _entries[:], .None
 }
 
-_stream_id_compare :: proc(lhs: Stream_ID, rhs: Stream_ID) -> int {
+Compare_Op :: enum {
+	Equal,
+	Less,
+	Greater,
+}
+
+// Returns how the lhs compares to rhs.
+_stream_id_compare :: proc(lhs: Stream_ID, rhs: Stream_ID) -> Compare_Op {
 	if lhs.ms == rhs.ms {
 		if lhs.seq == rhs.seq {
-			return 0
+			return .Equal
 		} else if lhs.seq > rhs.seq {
-			return -1
+			return .Greater
 		} else {
-			return 1
+			return .Less
 		}
 	} else if lhs.ms > rhs.ms {
-		return -1
+		return .Greater
 	} else {
-		return 1
+		return .Less
 	}
 }
 

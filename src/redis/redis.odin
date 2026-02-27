@@ -387,13 +387,21 @@ xrange :: proc(conn: ^Connection, args: []string) -> RESP {
 }
 
 xread :: proc(conn: ^Connection, args: []string) -> RESP {
-	entries, err := stream_read(conn.server.database, args[1], args[2])
+	entries, err := stream_read(conn.server.database, args[2], args[3])
+
 	if err != nil {
 		return RESP_Null_Array{}
 	}
 
 	result := RESP_Array{}
 	result.elements = make(type_of(result.elements))
+
+	stream_arr := RESP_Array{}
+	stream_arr.elements = make(type_of(stream_arr.elements))
+	append(&stream_arr.elements, RESP_Bulk_String{args[2]})
+
+	entries_arr := RESP_Array{}
+	entries_arr.elements = make(type_of(entries_arr.elements))
 
 	for entry in entries {
 		entry_arr := RESP_Array{}
@@ -409,9 +417,11 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 		}
 
 		append(&entry_arr.elements, fields_arr)
-		append(&result.elements, entry_arr)
+		append(&entries_arr.elements, entry_arr)
 	}
 
+	append(&stream_arr.elements, entries_arr)
+	append(&result.elements, stream_arr)
 
 	return result
 }
