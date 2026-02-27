@@ -386,42 +386,82 @@ xrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	return result
 }
 
-xread :: proc(conn: ^Connection, args: []string) -> RESP {
-	entries, err := stream_read(conn.server.database, args[2], args[3])
-
-	if err != nil {
-		return RESP_Null_Array{}
+maybe_id :: proc(s: string) -> bool {
+	n, n_ok := strconv.parse_u64(s)
+	if n_ok {
+		return true
 	}
+	if len(strings.split(s, "-")) == 2 {
+		return true
+	}
+
+	return false
+}
+
+xread :: proc(conn: ^Connection, args: []string) -> RESP {
+	keys_index := 0
+	for arg in args {
+		if 0 == strings.compare(strings.to_upper(arg), "STREAMS") {
+			keys_index += 1
+			break
+		}
+		keys_index += 1
+	}
+
+	ids_index := keys_index + 1
+	for id in args[keys_index + 1:] {
+		if maybe_id(id) {
+			break
+		}
+		ids_index += 1
+	}
+
+	keys_count := ids_index - keys_index
 
 	result := RESP_Array{}
 	result.elements = make(type_of(result.elements))
 
-	stream_arr := RESP_Array{}
-	stream_arr.elements = make(type_of(stream_arr.elements))
-	append(&stream_arr.elements, RESP_Bulk_String{args[2]})
+	for i := 0; i < keys_count; i += 1 {
 
-	entries_arr := RESP_Array{}
-	entries_arr.elements = make(type_of(entries_arr.elements))
+		entries, err := stream_read(
+			conn.server.database,
+			args[keys_index + i],
+			args[ids_index + i],
+		)
 
-	for entry in entries {
-		entry_arr := RESP_Array{}
-		entry_arr.elements = make(type_of(entry_arr.elements))
-		id := stream_entry_id_string(entry.id)
-		append(&entry_arr.elements, RESP_Bulk_String{id})
-
-		fields_arr := RESP_Array{}
-		fields_arr.elements = make(type_of(fields_arr.elements))
-		for k, v in entry.fields {
-			append(&fields_arr.elements, RESP_Bulk_String{k})
-			append(&fields_arr.elements, RESP_Bulk_String{v})
+		if err != nil {
+			continue
+			// return RESP_Null_Array{}
 		}
 
-		append(&entry_arr.elements, fields_arr)
-		append(&entries_arr.elements, entry_arr)
-	}
 
-	append(&stream_arr.elements, entries_arr)
-	append(&result.elements, stream_arr)
+		stream_arr := RESP_Array{}
+		stream_arr.elements = make(type_of(stream_arr.elements))
+		append(&stream_arr.elements, RESP_Bulk_String{args[2]})
+
+		entries_arr := RESP_Array{}
+		entries_arr.elements = make(type_of(entries_arr.elements))
+
+		for entry in entries {
+			entry_arr := RESP_Array{}
+			entry_arr.elements = make(type_of(entry_arr.elements))
+			id := stream_entry_id_string(entry.id)
+			append(&entry_arr.elements, RESP_Bulk_String{id})
+
+			fields_arr := RESP_Array{}
+			fields_arr.elements = make(type_of(fields_arr.elements))
+			for k, v in entry.fields {
+				append(&fields_arr.elements, RESP_Bulk_String{k})
+				append(&fields_arr.elements, RESP_Bulk_String{v})
+			}
+
+			append(&entry_arr.elements, fields_arr)
+			append(&entries_arr.elements, entry_arr)
+		}
+
+		append(&stream_arr.elements, entries_arr)
+		append(&result.elements, stream_arr)
+	}
 
 	return result
 }
