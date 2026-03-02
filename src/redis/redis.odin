@@ -233,7 +233,7 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 incr :: proc(conn: ^Connection, args: []string) -> RESP {
 	val, incr_err := string_incr(conn.server.database, args[1])
 	if incr_err != nil {
-		return RESP_Simple_Error{"Not an integer"}
+		return RESP_Simple_Error{"ERR value is not an integer or out of range"}
 	}
 	return RESP_Integer{val}
 }
