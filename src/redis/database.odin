@@ -54,6 +54,29 @@ string_get :: proc(db: ^Database, key: string) -> (value: String, error: Databas
 	return value, .None
 }
 
+string_incr :: proc(db: ^Database, key: string) -> (inc: i64, err: Database_Error) {
+	impl := database_lock(db)
+	defer database_unlock(impl)
+	str, get_err := database_typed_get(impl, key, String)
+	if get_err == .Key_Not_Found {
+		str = String {
+			value = "0",
+		}
+		database_set(impl, key, str)
+	}
+	val_i64, i64_ok := strconv.parse_i64(str.value)
+	if i64_ok {
+		inc = val_i64 + 1
+		buf: [256]byte
+		conv := strconv.write_int(buf[:], inc, 10)
+		str.value = strings.clone(conv)
+		database_set(impl, key, str)
+		return inc, .None
+	}
+
+	return 0, .Mismatch_Type
+}
+
 // ====== Generic ===========================
 
 generic_type :: proc(db: ^Database, key: string) -> (type: string, error: Database_Error) {

@@ -151,6 +151,7 @@ commands_table := map[string]Command {
 	},
 	"XRANGE" = Command{"XRANGE", 4, xrange, {"key", "start", "end", "[COUNT count]"}},
 	"XREAD"  = Command{"XREAD", 4, xread, {"STREAMS", "key", "id"}},
+	"INCR"   = Command{"INCR", 2, incr, {"key"}},
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -227,6 +228,14 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 	}
 
 	return RESP_Null_Bulk_String{}
+}
+
+incr :: proc(conn: ^Connection, args: []string) -> RESP {
+	val, incr_err := string_incr(conn.server.database, args[1])
+	if incr_err != nil {
+		return RESP_Simple_Error{"Not an integer"}
+	}
+	return RESP_Integer{val}
 }
 
 rpush :: proc(conn: ^Connection, args: []string) -> RESP {
