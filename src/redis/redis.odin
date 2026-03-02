@@ -396,6 +396,9 @@ maybe_id :: proc(s: string) -> bool {
 	if len(strings.split(s, "-")) == 2 {
 		return true
 	}
+	if 0 == strings.compare(s, "$") {
+		return true
+	}
 
 	return false
 }
@@ -434,6 +437,17 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 		ids_index += 1
 	}
 
+	for i := 0; i < len(args) - ids_index; i += 1 {
+		if 0 == strings.compare(args[ids_index], "$") {
+			top, top_err := stream_top(conn.server.database, args[streams_index + i])
+			if top != nil {
+				args[ids_index + i] = stream_entry_id_string(top.id)
+			} else {
+				args[ids_index + i] = stream_entry_id_string(Stream_ID_Zero)
+			}
+		}
+	}
+
 	streams_count := ids_index - streams_index
 
 	result := RESP_Array{}
@@ -456,9 +470,6 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 		for i: i64 = 0; true; i += resolution_ns {
 			if block_duration > 0 && i > i64(block_duration) {
 				fmt.printfln("Timeout of [%dms] execeeded", block_ms)
-				// msg := fmt.tprintfln("Timeout of [%dms] execeeded", block_ms)
-				// buf := transmute([]byte)msg
-				// net.send_tcp(conn.socket, buf)
 				return RESP_Null_Array{}
 			}
 

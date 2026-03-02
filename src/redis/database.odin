@@ -288,7 +288,7 @@ Stream_ID :: struct {
 	seq: u64,
 }
 
-Stream_ID_None :: Stream_ID{}
+Stream_ID_Zero :: Stream_ID{}
 Stream_ID_Min :: Stream_ID{0, 1}
 Stream_ID_Max :: Stream_ID{max(u64), max(u64)}
 
@@ -433,6 +433,23 @@ stream_read :: proc(
 	return _entries[:], .None
 }
 
+stream_top :: proc(db: ^Database, key: string) -> (entry: ^Stream_Entry, err: Stream_Error) {
+
+	impl := database_lock(db)
+	defer database_unlock(impl)
+
+	stream, get_err := database_typed_get(impl, key, Stream)
+	if get_err == .Key_Not_Found {
+		stream = stream_init()
+	} else if get_err != nil {
+		return {}, err
+	}
+
+	iter := linked_list.iterator_tail(stream.elements^, Stream_Entry, "node")
+	elem, _ := linked_list.iterate_prev(&iter)
+	return elem, .None
+}
+
 Compare_Op :: enum {
 	Equal,
 	Less,
@@ -467,14 +484,14 @@ _stream_range_parse_id :: proc(id_arg: string, default_seq: u64) -> (id: Stream_
 	_ms, ms_ok := strconv.parse_u64(parts[0])
 
 	if !ms_ok {
-		return Stream_ID_None, false
+		return Stream_ID_Zero, false
 	}
 	if len(parts) == 1 {
 		return {_ms, default_seq}, true
 	}
 	_seq, seq_ok := strconv.parse_u64(parts[1])
 	if !seq_ok {
-		return Stream_ID_None, false
+		return Stream_ID_Zero, false
 	}
 	return {_ms, _seq}, true
 }
