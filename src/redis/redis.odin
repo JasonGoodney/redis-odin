@@ -152,6 +152,7 @@ commands_table := map[string]Command {
 	"XRANGE" = Command{"XRANGE", 4, xrange, {"key", "start", "end", "[COUNT count]"}},
 	"XREAD"  = Command{"XREAD", 4, xread, {"STREAMS", "key", "id"}},
 	"INCR"   = Command{"INCR", 2, incr, {"key"}},
+	"MULTI"  = Command{"MULTI", 1, multi, {}},
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -559,6 +560,10 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 
 	append(&stream_arr.elements, arr_of_entries)
 	append(&parent.elements, stream_arr)
+}
+
+multi :: proc(conn: ^Connection, args: []string) -> RESP {
+	return RESP_Simple_String{"OK"}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
