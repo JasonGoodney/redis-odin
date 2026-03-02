@@ -565,7 +565,10 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 }
 
 multi :: proc(conn: ^Connection, args: []string) -> RESP {
-	queue.init(conn.cmd_queue)
+	err := queue.init(conn.cmd_queue)
+	if err != nil {
+		fmt.eprintfln("Queue init err: %v", err)
+	}
 	return RESP_Simple_String{"OK"}
 }
 
