@@ -153,7 +153,7 @@ commands_table := map[string]Command {
 	"XREAD"  = Command{"XREAD", 4, xread, {"STREAMS", "key", "id"}},
 	"INCR"   = Command{"INCR", 2, incr, {"key"}},
 	"MULTI"  = Command{"MULTI", 1, multi, {}},
-	"EXEC"   = Command{"EXEC", 1, multi, {}},
+	"EXEC"   = Command{"EXEC", 1, exec, {}},
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
