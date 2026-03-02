@@ -19,9 +19,10 @@ Server :: struct {
 }
 
 Connection :: struct {
-	server: ^Server,
-	socket: net.TCP_Socket,
-	buffer: [256]byte,
+	server:    ^Server,
+	socket:    net.TCP_Socket,
+	buffer:    [256]byte,
+	cmd_queue: ^queue.Queue(^Command),
 }
 
 connect :: proc(ip: string, port: int) {
@@ -564,11 +565,17 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 }
 
 multi :: proc(conn: ^Connection, args: []string) -> RESP {
+	queue.init(conn.cmd_queue)
 	return RESP_Simple_String{"OK"}
 }
 
 exec :: proc(conn: ^Connection, args: []string) -> RESP {
-	return RESP_Simple_Error{"ERR EXEC without MULTI"}
+	if conn.cmd_queue == nil {
+		return RESP_Simple_Error{"ERR EXEC without MULTI"}
+	}
+
+	queue.destroy(conn.cmd_queue)
+	return RESP_Array{}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
