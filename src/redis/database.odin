@@ -406,6 +406,7 @@ stream_read :: proc(
 	entries: []Stream_Entry,
 	err: Stream_Error,
 ) {
+	impl := database_lock(db)
 	defer database_unlock(impl)
 
 	stream, get_err := database_typed_get(impl, key, Stream)
