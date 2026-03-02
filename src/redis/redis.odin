@@ -16,13 +16,13 @@ Server :: struct {
 	socket:      net.TCP_Socket,
 	database:    ^Database,
 	connections: queue.Queue(^Connection),
+	cmd_queue:   ^queue.Queue(^Command),
 }
 
 Connection :: struct {
-	server:    ^Server,
-	socket:    net.TCP_Socket,
-	buffer:    [256]byte,
-	cmd_queue: ^queue.Queue(^Command),
+	server: ^Server,
+	socket: net.TCP_Socket,
+	buffer: [256]byte,
 }
 
 connect :: proc(ip: string, port: int) {
@@ -565,7 +565,8 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 }
 
 multi :: proc(conn: ^Connection, args: []string) -> RESP {
-	err := queue.init(conn.cmd_queue)
+	conn.server.cmd_queue = new(queue.Queue(^Command))
+	err := queue.init(conn.server.cmd_queue)
 	if err != nil {
 		fmt.eprintfln("Queue init err: %v", err)
 	}
@@ -573,11 +574,12 @@ multi :: proc(conn: ^Connection, args: []string) -> RESP {
 }
 
 exec :: proc(conn: ^Connection, args: []string) -> RESP {
-	if conn.cmd_queue == nil {
+	if conn.server.cmd_queue == nil {
 		return RESP_Simple_Error{"ERR EXEC without MULTI"}
 	}
 
-	queue.destroy(conn.cmd_queue)
+	queue.destroy(conn.server.cmd_queue)
+	conn.server.cmd_queue = nil
 	return RESP_Array{}
 }
 
