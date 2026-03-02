@@ -345,7 +345,6 @@ stream_add :: proc(
 	}
 
 	ms, seq := _parse_stream_id(id, last_entry_id.ms, last_entry_id.seq) or_return
-	fmt.printfln("entry id: %d-%d", ms, seq)
 	entry = stream_entry_init()
 	entry.id = {ms, seq}
 	entry.fields = fields
@@ -407,7 +406,6 @@ stream_read :: proc(
 	entries: []Stream_Entry,
 	err: Stream_Error,
 ) {
-	impl := database_lock(db)
 	defer database_unlock(impl)
 
 	stream, get_err := database_typed_get(impl, key, Stream)
@@ -426,12 +424,10 @@ stream_read :: proc(
 
 	iter := linked_list.iterator_head(stream.elements^, Stream_Entry, "node")
 	for elem in linked_list.iterate_next(&iter) {
-		lhs := _stream_id_compare(start_id, elem.id)
+		lhs := _stream_id_compare(elem.id, start_id)
 		if lhs == .Greater {
-			continue
+			append(&_entries, elem^)
 		}
-
-		append(&_entries, elem^)
 	}
 	return _entries[:], .None
 }

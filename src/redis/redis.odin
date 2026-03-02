@@ -93,7 +93,6 @@ handle_msg :: proc(conn: ^Connection) {
 			return bulkstr.(RESP_Bulk_String).value
 		})
 
-		response: string
 		err_msg, ok := check_command_usage(args)
 		if !ok {
 			// Outputs to the server.
@@ -104,7 +103,10 @@ handle_msg :: proc(conn: ^Connection) {
 
 		cmd := commands_table[strings.to_upper(args[0])]
 		resp := cmd.handler(conn, args)
-		response = encode(resp)
+		response := encode(resp)
+		if response == "" {
+			continue
+		}
 
 		buffer := transmute([]u8)response
 		bytes_sent, err_send := net.send_tcp(conn.socket, buffer)
@@ -399,71 +401,144 @@ maybe_id :: proc(s: string) -> bool {
 }
 
 xread :: proc(conn: ^Connection, args: []string) -> RESP {
-	keys_index := 0
+	block_index := 0
+	block_found := false
 	for arg in args {
-		if 0 == strings.compare(strings.to_upper(arg), "STREAMS") {
-			keys_index += 1
+		if 0 == strings.compare(strings.to_upper(arg), "BLOCK") {
+			block_found = true
 			break
 		}
-		keys_index += 1
+		block_index += 1
 	}
 
-	ids_index := keys_index + 1
-	for id in args[keys_index + 1:] {
+	streams_index := 0
+	streams_found := false
+	for arg in args {
+		if 0 == strings.compare(strings.to_upper(arg), "STREAMS") {
+			streams_found = true
+			streams_index += 1
+			break
+		}
+		streams_index += 1
+	}
+
+	if !streams_found {
+		return RESP_Null_Array{}
+	}
+
+	ids_index := streams_index + 1
+	for id in args[streams_index + 1:] {
 		if maybe_id(id) {
 			break
 		}
 		ids_index += 1
 	}
 
-	keys_count := ids_index - keys_index
+	streams_count := ids_index - streams_index
 
 	result := RESP_Array{}
 	result.elements = make(type_of(result.elements))
 
-	for i := 0; i < keys_count; i += 1 {
-
-		entries, err := stream_read(
-			conn.server.database,
-			args[keys_index + i],
-			args[ids_index + i],
-		)
-
-		if err != nil {
-			continue
-			// return RESP_Null_Array{}
+	block: if block_found {
+		block_ms: i64 = 0
+		if block_found && block_index + 1 < len(args) {
+			ms, ok := strconv.parse_i64(args[block_index + 1])
+			if ok {
+				block_ms = ms
+			}
 		}
+		block_duration := time.Duration(block_ms * 1_000_000)
 
+		resolution_ms: i64 = 100
+		resolution_ns: i64 = resolution_ms * 1_000_000
+		sleep_duration := time.Duration(resolution_ns)
 
-		stream_arr := RESP_Array{}
-		stream_arr.elements = make(type_of(stream_arr.elements))
-		append(&stream_arr.elements, RESP_Bulk_String{args[keys_index + i]})
-
-		entries_arr := RESP_Array{}
-		entries_arr.elements = make(type_of(entries_arr.elements))
-
-		for entry in entries {
-			entry_arr := RESP_Array{}
-			entry_arr.elements = make(type_of(entry_arr.elements))
-			id := stream_entry_id_string(entry.id)
-			append(&entry_arr.elements, RESP_Bulk_String{id})
-
-			fields_arr := RESP_Array{}
-			fields_arr.elements = make(type_of(fields_arr.elements))
-			for k, v in entry.fields {
-				append(&fields_arr.elements, RESP_Bulk_String{k})
-				append(&fields_arr.elements, RESP_Bulk_String{v})
+		for i: i64 = 0; true; i += resolution_ns {
+			if block_duration > 0 && i > i64(block_duration) {
+				fmt.printfln("Timeout of [%dms] execeeded", block_ms)
+				// msg := fmt.tprintfln("Timeout of [%dms] execeeded", block_ms)
+				// buf := transmute([]byte)msg
+				// net.send_tcp(conn.socket, buf)
+				return RESP_Null_Array{}
 			}
 
-			append(&entry_arr.elements, fields_arr)
-			append(&entries_arr.elements, entry_arr)
+			if streams_count > 1 {
+				_xread_stream_multi(conn, args[streams_index:ids_index], args[ids_index:], &result)
+			} else {
+				_xread_stream_single(conn, args[streams_index], args[ids_index], &result)
+			}
+
+			if len(result.elements) > 0 {
+				break block
+			}
+
+			time.sleep(sleep_duration)
+		}
+	} else {
+		if streams_count > 1 {
+			_xread_stream_multi(conn, args[streams_index:ids_index], args[ids_index:], &result)
+		} else {
+			_xread_stream_single(conn, args[streams_index], args[ids_index], &result)
 		}
 
-		append(&stream_arr.elements, entries_arr)
-		append(&result.elements, stream_arr)
 	}
 
-	return result
+	if len(result.elements) == 0 {
+		return RESP_Null_Array{}
+	} else {
+		return result
+	}
+}
+
+_xread_stream_multi :: proc(
+	conn: ^Connection,
+	streams: []string,
+	ids: []string,
+	parent: ^RESP_Array,
+) {
+	for i := 0; i < len(streams); i += 1 {
+		_xread_stream_single(conn, streams[i], ids[i], parent)
+	}
+}
+
+_xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, parent: ^RESP_Array) {
+	stream_arr := RESP_Array{}
+	stream_arr.elements = make(type_of(stream_arr.elements))
+	append(&stream_arr.elements, RESP_Bulk_String{stream})
+
+	entries, err := stream_read(conn.server.database, stream, id)
+
+	if err != nil {
+		fmt.printfln("xread failed with error: %v", err)
+		return
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	arr_of_entries := RESP_Array{}
+	arr_of_entries.elements = make(type_of(arr_of_entries.elements))
+
+	for entry in entries {
+		entry_arr := RESP_Array{}
+		entry_arr.elements = make(type_of(entry_arr.elements))
+		id := stream_entry_id_string(entry.id)
+		append(&entry_arr.elements, RESP_Bulk_String{id})
+
+		fields_arr := RESP_Array{}
+		fields_arr.elements = make(type_of(fields_arr.elements))
+		for k, v in entry.fields {
+			append(&fields_arr.elements, RESP_Bulk_String{k})
+			append(&fields_arr.elements, RESP_Bulk_String{v})
+		}
+
+		append(&entry_arr.elements, fields_arr)
+		append(&arr_of_entries.elements, entry_arr)
+	}
+
+	append(&stream_arr.elements, arr_of_entries)
+	append(&parent.elements, stream_arr)
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
