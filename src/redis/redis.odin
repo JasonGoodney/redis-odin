@@ -2,7 +2,6 @@
 
 package redis
 
-import "core:container/queue"
 import "core:fmt"
 import "core:net"
 import "core:slice"
@@ -15,34 +14,18 @@ server: Server
 Server :: struct {
 	socket:      net.TCP_Socket,
 	database:    ^Database,
-	connections: [posix.FD_SETSIZE]^Connection,
+	connections: [1024]^Connection,
 }
 
 Connection :: struct {
-	server:       ^Server,
-	socket:       net.TCP_Socket,
-	buffer:       [256]byte,
-	transaction:  bool,
-	transactions: ^queue.Queue(^Command),
+	server:         ^Server,
+	socket:         net.TCP_Socket,
+	buffer:         [256]byte,
+	in_transaction: bool,
+	transactions:   [dynamic]Transaction,
 }
-
-import "core:c"
-import "core:sys/posix"
-
-Server_Error :: union {
-	net.Network_Error,
-	c.int,
-}
-
-FD :: posix.FD
-fd_set :: posix.fd_set
-FD_ZERO :: posix.FD_ZERO
-FD_SET :: posix.FD_SET
-FD_ISSET :: posix.FD_ISSET
-FD_CLR :: posix.FD_CLR
 
 connect :: proc(ip: string, port: int) {
-
 	local_addr, addr_ok := net.parse_ip4_address(ip)
 	if !addr_ok {
 		fmt.println("Failed to parse IP address")
@@ -61,61 +44,10 @@ connect :: proc(ip: string, port: int) {
 
 	fmt.printfln("Listening on TCP: %s", net.endpoint_to_string(endpoint))
 
-	master_set: fd_set
-	read_set: fd_set
-	max_fd := server_socket
-	FD_ZERO(&master_set)
-	FD_SET(FD(server_socket), &master_set)
-
 	retry := 1
 	max_retries := 5
 	for {
-		// read_set = master_set
-
-		// if 0 > posix.select(c.int(max_fd + 1), &read_set, nil, nil, nil) {
-		// 	posix.perror("select")
-		// 	break
-		// }
-
-		// for fd: net.TCP_Socket = 0; fd <= max_fd; fd += 1 {
-		// 	if !FD_ISSET(FD(fd), &read_set) {
-		// 		continue
-		// 	}
-
-		// 	if fd == server_socket {
-		// 		client, src, err := net.accept_tcp(server_socket)
-		// 		if err != nil {
-		// 			fmt.eprintfln("accept error: %v", err)
-		// 			continue
-		// 		}
-
-		// 		if server.connections[client] == nil {
-		// 			conn := new(Connection)
-		// 			conn.server = &server
-		// 			conn.socket = client
-		// 			server.connections[client] = conn
-		// 		}
-		// 		FD_SET(FD(client), &master_set)
-		// 		if client > max_fd {
-		// 			max_fd = client
-		// 		}
-
-		// 		fmt.printfln("New client connection: [%d] %v:%d", client, src.address, src.port)
-		// 	} else {
-		// 		conn := server.connections[fd]
-		// 		if conn == nil {
-		// 			continue
-		// 		}
-		// 		handle_connection(conn)
-		// 		FD_CLR(FD(fd), &master_set)
-		// 	}
-		// }
-
 		client, _, err_accept := net.accept_tcp(server.socket)
-		conn := new(Connection)
-		conn.server = &server
-		conn.socket = client
-
 		if err_accept != nil {
 			fmt.println("Failed to accept TCP connection")
 			retry += 1
@@ -124,7 +56,15 @@ connect :: proc(ip: string, port: int) {
 			}
 			continue
 		}
+		conn := server.connections[client]
+		if conn == nil {
+			conn = new(Connection)
+			conn.server = &server
+			conn.socket = client
+			server.connections[client] = conn
+		}
 
+		fmt.printfln("Client connected: [fd=%d]", client)
 		thread.create_and_start_with_poly_data(conn, handle_connection)
 	}
 
@@ -134,6 +74,11 @@ connect :: proc(ip: string, port: int) {
 }
 
 handle_connection :: proc(conn: ^Connection) {
+	defer {
+		fmt.println("Disconnecting client")
+		server.connections[conn.socket] = nil
+		net.close(conn.socket)
+	}
 	for {
 		bytes_recv, err_recv := net.recv_tcp(conn.socket, conn.buffer[:])
 		if err_recv != nil {
@@ -145,7 +90,6 @@ handle_connection :: proc(conn: ^Connection) {
 		   is_ctrl_d(received) ||
 		   is_empty(received) ||
 		   is_telnet_ctrl_c(received) {
-			// fmt.println("Disconnecting client")
 			break
 		}
 
@@ -175,8 +119,8 @@ handle_connection :: proc(conn: ^Connection) {
 			break
 		}
 		resp: RESP
-		if conn.transaction && cmd.name != "EXEC" {
-			queue.push_back(conn.transactions, &cmd)
+		if conn.in_transaction && cmd.name != "EXEC" {
+			append(&conn.transactions, Transaction{cmd, args})
 			resp = RESP_Simple_String{"QUEUED"}
 		} else {
 			resp = cmd.handler(conn, args)
@@ -195,8 +139,11 @@ handle_connection :: proc(conn: ^Connection) {
 		sent := buffer[:bytes_sent]
 		fmt.printfln("Server sent [ %d bytes ]: %s", len(sent), sent)
 	}
+}
 
-	net.close(conn.socket)
+Transaction :: struct {
+	cmd:  Command,
+	args: []string,
 }
 
 Command_Handler :: proc(conn: ^Connection, args: []string) -> RESP
@@ -643,24 +590,29 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 }
 
 multi :: proc(conn: ^Connection, args: []string) -> RESP {
-	conn.transactions = new(queue.Queue(^Command))
-	err := queue.init(conn.transactions)
-	if err != nil {
-		fmt.eprintfln("Queue init err: %v", err)
-		return RESP_Simple_Error{"MULTI"}
-	}
-	conn.transaction = true
+	conn.transactions = make(type_of(conn.transactions))
+	conn.in_transaction = true
 	return RESP_Simple_String{"OK"}
 }
 
 exec :: proc(conn: ^Connection, args: []string) -> RESP {
-	if !conn.transaction {
+	defer {
+		delete(conn.transactions)
+		conn.in_transaction = false
+	}
+
+	if !conn.in_transaction {
 		return RESP_Simple_Error{"ERR EXEC without MULTI"}
 	}
 
-	queue.destroy(conn.transactions)
-	conn.transaction = false
-	return RESP_Array{}
+	resp: RESP_Array
+	resp.elements = make(type_of(resp.elements))
+	for trans in conn.transactions {
+		r := trans.cmd.handler(conn, trans.args)
+		append(&resp.elements, r)
+	}
+
+	return resp
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
