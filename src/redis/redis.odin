@@ -15,15 +15,31 @@ server: Server
 Server :: struct {
 	socket:      net.TCP_Socket,
 	database:    ^Database,
-	connections: queue.Queue(^Connection),
-	cmd_queue:   ^queue.Queue(^Command),
+	connections: [posix.FD_SETSIZE]^Connection,
 }
 
 Connection :: struct {
-	server: ^Server,
-	socket: net.TCP_Socket,
-	buffer: [256]byte,
+	server:       ^Server,
+	socket:       net.TCP_Socket,
+	buffer:       [256]byte,
+	transaction:  bool,
+	transactions: ^queue.Queue(^Command),
 }
+
+import "core:c"
+import "core:sys/posix"
+
+Server_Error :: union {
+	net.Network_Error,
+	c.int,
+}
+
+FD :: posix.FD
+fd_set :: posix.fd_set
+FD_ZERO :: posix.FD_ZERO
+FD_SET :: posix.FD_SET
+FD_ISSET :: posix.FD_ISSET
+FD_CLR :: posix.FD_CLR
 
 connect :: proc(ip: string, port: int) {
 
@@ -38,16 +54,63 @@ connect :: proc(ip: string, port: int) {
 		port    = port,
 	}
 
-	socket, listen_err := net.listen_tcp(endpoint)
+	server_socket, listen_err := net.listen_tcp(endpoint)
 	fmt.assertf(listen_err == nil, "Failed to listen on [%s:%d]: %v", ip, port, listen_err)
-	server.socket = socket
+	server.socket = server_socket
 	server.database = database_init()
 
 	fmt.printfln("Listening on TCP: %s", net.endpoint_to_string(endpoint))
 
+	master_set: fd_set
+	read_set: fd_set
+	max_fd := server_socket
+	FD_ZERO(&master_set)
+	FD_SET(FD(server_socket), &master_set)
+
 	retry := 1
 	max_retries := 5
 	for {
+		// read_set = master_set
+
+		// if 0 > posix.select(c.int(max_fd + 1), &read_set, nil, nil, nil) {
+		// 	posix.perror("select")
+		// 	break
+		// }
+
+		// for fd: net.TCP_Socket = 0; fd <= max_fd; fd += 1 {
+		// 	if !FD_ISSET(FD(fd), &read_set) {
+		// 		continue
+		// 	}
+
+		// 	if fd == server_socket {
+		// 		client, src, err := net.accept_tcp(server_socket)
+		// 		if err != nil {
+		// 			fmt.eprintfln("accept error: %v", err)
+		// 			continue
+		// 		}
+
+		// 		if server.connections[client] == nil {
+		// 			conn := new(Connection)
+		// 			conn.server = &server
+		// 			conn.socket = client
+		// 			server.connections[client] = conn
+		// 		}
+		// 		FD_SET(FD(client), &master_set)
+		// 		if client > max_fd {
+		// 			max_fd = client
+		// 		}
+
+		// 		fmt.printfln("New client connection: [%d] %v:%d", client, src.address, src.port)
+		// 	} else {
+		// 		conn := server.connections[fd]
+		// 		if conn == nil {
+		// 			continue
+		// 		}
+		// 		handle_connection(conn)
+		// 		FD_CLR(FD(fd), &master_set)
+		// 	}
+		// }
+
 		client, _, err_accept := net.accept_tcp(server.socket)
 		conn := new(Connection)
 		conn.server = &server
@@ -62,7 +125,7 @@ connect :: proc(ip: string, port: int) {
 			continue
 		}
 
-		thread.create_and_start_with_poly_data(conn, handle_msg)
+		thread.create_and_start_with_poly_data(conn, handle_connection)
 	}
 
 	fmt.println("Closing server.")
@@ -70,7 +133,7 @@ connect :: proc(ip: string, port: int) {
 	net.close(server.socket)
 }
 
-handle_msg :: proc(conn: ^Connection) {
+handle_connection :: proc(conn: ^Connection) {
 	for {
 		bytes_recv, err_recv := net.recv_tcp(conn.socket, conn.buffer[:])
 		if err_recv != nil {
@@ -82,13 +145,17 @@ handle_msg :: proc(conn: ^Connection) {
 		   is_ctrl_d(received) ||
 		   is_empty(received) ||
 		   is_telnet_ctrl_c(received) {
-			fmt.println("Disconnecting client")
+			// fmt.println("Disconnecting client")
 			break
 		}
 
 		fmt.printfln("Server received [ %d bytes ]: %s", len(received), received)
 
 		decoded, err := decode(received)
+		if err != nil {
+			fmt.eprintfln("decode error: %v", err)
+			break
+		}
 		resp_arr := decoded.(RESP_Array)
 		args := slice.mapper(resp_arr.elements[:], proc(bulkstr: RESP) -> string {
 			return bulkstr.(RESP_Bulk_String).value
@@ -102,11 +169,21 @@ handle_msg :: proc(conn: ^Connection) {
 			break
 		}
 
-		cmd := commands_table[strings.to_upper(args[0])]
-		resp := cmd.handler(conn, args)
+		cmd, cmd_ok := commands_table[strings.to_upper(args[0])]
+		if !cmd_ok {
+			fmt.printfln("Unsupported command: %s", args[0])
+			break
+		}
+		resp: RESP
+		if conn.transaction && cmd.name != "EXEC" {
+			queue.push_back(conn.transactions, &cmd)
+			resp = RESP_Simple_String{"QUEUED"}
+		} else {
+			resp = cmd.handler(conn, args)
+		}
 		response := encode(resp)
 		if response == "" {
-			continue
+			break
 		}
 
 		buffer := transmute([]u8)response
@@ -225,7 +302,8 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 	case .Expired:
 		return RESP_Null_Bulk_String{}
 	case .Key_Not_Found, .Mismatch_Type:
-		return RESP_Simple_Error{"(error) Key not found"}
+		// return RESP_Simple_Error{"Key not found"}
+		return RESP_Null_Bulk_String{}
 	case .None:
 		return RESP_Bulk_String{val.value}
 	}
@@ -565,21 +643,23 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 }
 
 multi :: proc(conn: ^Connection, args: []string) -> RESP {
-	conn.server.cmd_queue = new(queue.Queue(^Command))
-	err := queue.init(conn.server.cmd_queue)
+	conn.transactions = new(queue.Queue(^Command))
+	err := queue.init(conn.transactions)
 	if err != nil {
 		fmt.eprintfln("Queue init err: %v", err)
+		return RESP_Simple_Error{"MULTI"}
 	}
+	conn.transaction = true
 	return RESP_Simple_String{"OK"}
 }
 
 exec :: proc(conn: ^Connection, args: []string) -> RESP {
-	if conn.server.cmd_queue == nil {
+	if !conn.transaction {
 		return RESP_Simple_Error{"ERR EXEC without MULTI"}
 	}
 
-	queue.destroy(conn.server.cmd_queue)
-	conn.server.cmd_queue = nil
+	queue.destroy(conn.transactions)
+	conn.transaction = false
 	return RESP_Array{}
 }
 
