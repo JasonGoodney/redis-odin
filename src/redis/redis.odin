@@ -17,12 +17,17 @@ Server :: struct {
 	connections: [1024]^Connection,
 }
 
+Connection_State :: enum {
+	Normal = 0,
+	Transaction,
+}
+
 Connection :: struct {
-	server:         ^Server,
-	socket:         net.TCP_Socket,
-	buffer:         [256]byte,
-	in_transaction: bool,
-	transactions:   [dynamic]Transaction,
+	server:       ^Server,
+	socket:       net.TCP_Socket,
+	buffer:       [256]byte,
+	state:        Connection_State,
+	transactions: [dynamic]Transaction,
 }
 
 connect :: proc(ip: string, port: int) {
@@ -113,15 +118,14 @@ handle_connection :: proc(conn: ^Connection) {
 			break
 		}
 
-		cmd, cmd_ok := commands_table[strings.to_upper(args[0])]
+		cmd, cmd_ok := get_command(args[0])
 		if !cmd_ok {
 			fmt.printfln("Unsupported command: %s", args[0])
 			break
 		}
 		resp: RESP
-		if conn.in_transaction && cmd.name != "EXEC" && cmd.name != "DISCARD" {
-			append(&conn.transactions, Transaction{cmd, args})
-			resp = RESP_Simple_String{"QUEUED"}
+		if conn.state == .Transaction && cmd.name != "EXEC" && cmd.name != "DISCARD" {
+			resp = transaction_queue(conn, args)
 		} else {
 			resp = cmd.handler(conn, args)
 		}
@@ -152,6 +156,9 @@ Command :: struct {
 	min_args:  int,
 	handler:   Command_Handler,
 	arguments: []string,
+}
+get_command :: proc(name: string) -> (cmd: Command, ok: bool) #optional_ok {
+	return commands_table[strings.to_upper(name)]
 }
 
 commands_table := map[string]Command {
@@ -592,17 +599,18 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 
 multi :: proc(conn: ^Connection, args: []string) -> RESP {
 	conn.transactions = make(type_of(conn.transactions))
-	conn.in_transaction = true
+	conn.state = .Transaction
 	return RESP_Simple_String{"OK"}
 }
 
-exec :: proc(conn: ^Connection, args: []string) -> RESP {
-	defer {
-		delete(conn.transactions)
-		conn.in_transaction = false
-	}
+transaction_queue :: proc(conn: ^Connection, args: []string) -> RESP {
+	cmd := get_command(args[0])
+	append(&conn.transactions, Transaction{cmd, args})
+	return RESP_Simple_String{"QUEUED"}
+}
 
-	if !conn.in_transaction {
+exec :: proc(conn: ^Connection, args: []string) -> RESP {
+	if conn.state == .Normal {
 		return RESP_Simple_Error{"ERR EXEC without MULTI"}
 	}
 
@@ -613,20 +621,18 @@ exec :: proc(conn: ^Connection, args: []string) -> RESP {
 		append(&resp.elements, r)
 	}
 
+	delete(conn.transactions)
+	conn.state = .Normal
 	return resp
 }
 
-
 discard :: proc(conn: ^Connection, args: []string) -> RESP {
-	defer {
-		delete(conn.transactions)
-		conn.in_transaction = false
-	}
-
-	if !conn.in_transaction {
+	if conn.state == .Normal {
 		return RESP_Simple_Error{"ERR DISCARD without MULTI"}
 	}
 
+	clear(&conn.transactions)
+	conn.state = .Normal
 	return RESP_Simple_String{"OK"}
 }
 
