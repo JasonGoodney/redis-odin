@@ -185,6 +185,7 @@ commands_table := map[string]Command {
 	"MULTI"   = Command{"MULTI", 1, multi, {}},
 	"EXEC"    = Command{"EXEC", 1, exec, {}},
 	"DISCARD" = Command{"DISCARD", 1, discard, {}},
+	"INFO"    = Command{"INFO", 1, info, {"[section [section ...]]"}},
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -646,6 +647,15 @@ discard :: proc(conn: ^Connection, args: []string) -> RESP {
 	return RESP_Simple_String{"OK"}
 }
 
+info :: proc(conn: ^Connection, args: []string) -> RESP {
+	repl_arg_index := index_string(args, "replication")
+	if repl_arg_index > -1 {
+		return RESP_Bulk_String{"role:master"}
+	}
+
+	return RESP_Null_Bulk_String{}
+}
+
 is_ctrl_d :: proc(bytes: []u8) -> bool {
 	return len(bytes) == 1 && bytes[0] == 4
 }
@@ -671,5 +681,14 @@ is_telnet_ctrl_c :: proc(bytes: []u8) -> bool {
 
 insensitive_compare :: proc(lhs: string, rhs: string) -> bool {
 	return 0 == strings.compare(strings.to_lower(lhs), strings.to_lower(rhs))
+}
+
+index_string :: proc(arr: []string, s: string) -> int {
+	for item, i in arr {
+		if item == s {
+			return i
+		}
+	}
+	return -1
 }
 
