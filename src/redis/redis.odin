@@ -155,30 +155,31 @@ Command :: struct {
 }
 
 commands_table := map[string]Command {
-	"PING"   = Command{"PING", 1, ping, {"[message]"}},
-	"ECHO"   = Command{"ECHO", 2, echo, {"message"}},
-	"SET"    = Command{"SET", 3, set, {"key", "value", "[options]"}},
-	"GET"    = Command{"GET", 2, get, {"get"}},
-	"RPUSH"  = Command{"RPUSH", 3, rpush, {"key", "element", "[element ...]"}},
-	"LPUSH"  = Command{"LPUSH", 3, lpush, {"key", "element", "[element ...]"}},
-	"LRANGE" = Command{"LRANGE", 4, lrange, {"key", "start", "stop"}},
-	"LLEN"   = Command{"LLEN", 2, llen, {"key"}},
-	"LPOP"   = Command{"LPOP", 2, lpop, {"key", "[count]"}},
-	"RPOP"   = Command{"RPOP", 2, rpop, {"key", "count"}},
-	"BLPOP"  = Command{"BLPOP", 3, blpop, {"key", "[key ...]", "timeout"}},
-	"BRPOP"  = Command{"BRPOP", 3, brpop, {"key", "[key ...]", "timeout"}},
-	"TYPE"   = Command{"TYPE", 2, type, {"key"}},
-	"XADD"   = Command {
+	"PING"    = Command{"PING", 1, ping, {"[message]"}},
+	"ECHO"    = Command{"ECHO", 2, echo, {"message"}},
+	"SET"     = Command{"SET", 3, set, {"key", "value", "[options]"}},
+	"GET"     = Command{"GET", 2, get, {"get"}},
+	"RPUSH"   = Command{"RPUSH", 3, rpush, {"key", "element", "[element ...]"}},
+	"LPUSH"   = Command{"LPUSH", 3, lpush, {"key", "element", "[element ...]"}},
+	"LRANGE"  = Command{"LRANGE", 4, lrange, {"key", "start", "stop"}},
+	"LLEN"    = Command{"LLEN", 2, llen, {"key"}},
+	"LPOP"    = Command{"LPOP", 2, lpop, {"key", "[count]"}},
+	"RPOP"    = Command{"RPOP", 2, rpop, {"key", "count"}},
+	"BLPOP"   = Command{"BLPOP", 3, blpop, {"key", "[key ...]", "timeout"}},
+	"BRPOP"   = Command{"BRPOP", 3, brpop, {"key", "[key ...]", "timeout"}},
+	"TYPE"    = Command{"TYPE", 2, type, {"key"}},
+	"XADD"    = Command {
 		"XADD",
 		5,
 		xadd,
 		{"key", "<* | id>", "field", "value", "[field value ...]"},
 	},
-	"XRANGE" = Command{"XRANGE", 4, xrange, {"key", "start", "end", "[COUNT count]"}},
-	"XREAD"  = Command{"XREAD", 4, xread, {"STREAMS", "key", "id"}},
-	"INCR"   = Command{"INCR", 2, incr, {"key"}},
-	"MULTI"  = Command{"MULTI", 1, multi, {}},
-	"EXEC"   = Command{"EXEC", 1, exec, {}},
+	"XRANGE"  = Command{"XRANGE", 4, xrange, {"key", "start", "end", "[COUNT count]"}},
+	"XREAD"   = Command{"XREAD", 4, xread, {"STREAMS", "key", "id"}},
+	"INCR"    = Command{"INCR", 2, incr, {"key"}},
+	"MULTI"   = Command{"MULTI", 1, multi, {}},
+	"EXEC"    = Command{"EXEC", 1, exec, {}},
+	"DISCARD" = Command{"DISCARD", 1, discard, {}},
 }
 
 check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
@@ -613,6 +614,20 @@ exec :: proc(conn: ^Connection, args: []string) -> RESP {
 	}
 
 	return resp
+}
+
+
+discard :: proc(conn: ^Connection, args: []string) -> RESP {
+	defer {
+		delete(conn.transactions)
+		conn.in_transaction = false
+	}
+
+	if !conn.in_transaction {
+		return RESP_Simple_Error{"ERR DISCARD without MULTI"}
+	}
+
+	return RESP_Simple_String{"OK"}
 }
 
 is_ctrl_d :: proc(bytes: []u8) -> bool {
