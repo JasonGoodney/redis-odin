@@ -11,7 +11,7 @@ import "core:strings"
 import "core:thread"
 import "core:time"
 
-g_server: Server
+server: Server
 Server :: struct {
 	socket:      net.TCP_Socket,
 	database:    ^Database,
@@ -40,17 +40,17 @@ connect :: proc(ip: string, port: int) {
 
 	socket, listen_err := net.listen_tcp(endpoint)
 	fmt.assertf(listen_err == nil, "Failed to listen on [%s:%d]: %v", ip, port, listen_err)
-	g_server.socket = socket
-	g_server.database = database_init()
+	server.socket = socket
+	server.database = database_init()
 
 	fmt.printfln("Listening on TCP: %s", net.endpoint_to_string(endpoint))
 
 	retry := 1
 	max_retries := 5
 	for {
-		client, _, err_accept := net.accept_tcp(g_server.socket)
+		client, _, err_accept := net.accept_tcp(server.socket)
 		conn := new(Connection)
-		conn.server = &g_server
+		conn.server = &server
 		conn.socket = client
 
 		if err_accept != nil {
@@ -67,7 +67,7 @@ connect :: proc(ip: string, port: int) {
 
 	fmt.println("Closing server.")
 
-	net.close(g_server.socket)
+	net.close(server.socket)
 }
 
 handle_msg :: proc(conn: ^Connection) {
