@@ -119,7 +119,7 @@ handle_connection :: proc(conn: ^Connection) {
 			break
 		}
 		resp: RESP
-		if conn.in_transaction && cmd.name != "EXEC" {
+		if conn.in_transaction && cmd.name != "EXEC" && cmd.name != "DISCARD" {
 			append(&conn.transactions, Transaction{cmd, args})
 			resp = RESP_Simple_String{"QUEUED"}
 		} else {
