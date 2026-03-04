@@ -110,12 +110,11 @@ handle_connection :: proc(conn: ^Connection) {
 			return bulkstr.(RESP_Bulk_String).value
 		})
 
+		resp: RESP
+
 		err_msg, ok := check_command_usage(args)
 		if !ok {
-			// Outputs to the server.
-			// Fix to output to the client
-			fmt.println(err_msg)
-			break
+			resp = RESP_Simple_Error{err_msg}
 		}
 
 		cmd, cmd_ok := get_command(args[0])
@@ -123,7 +122,6 @@ handle_connection :: proc(conn: ^Connection) {
 			fmt.printfln("Unsupported command: %s", args[0])
 			break
 		}
-		resp: RESP
 		if conn.state == .Transaction && cmd.name != "EXEC" && cmd.name != "DISCARD" {
 			resp = transaction_queue(conn, args)
 		} else {
@@ -196,7 +194,11 @@ check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
 	}
 	cmd := commands_table[strings.to_upper(args[0])]
 	if argc < cmd.min_args {
-		str := fmt.tprintf("Usage: %s %s", cmd.name, strings.join(cmd.arguments, " "))
+		str := fmt.tprintf(
+			"ERR wrong number of argument for '%s' command",
+			cmd.name,
+			strings.join(cmd.arguments, " "),
+		)
 		return str, false
 	}
 
@@ -256,9 +258,13 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 	switch err {
 	case .Expired:
 		return RESP_Null_Bulk_String{}
-	case .Key_Not_Found, .Mismatch_Type:
+	case .Key_Not_Found:
 		// return RESP_Simple_Error{"Key not found"}
 		return RESP_Null_Bulk_String{}
+	case .Mismatch_Type:
+		return RESP_Simple_Error {
+			"WRONGTYPE Operation against a key holding the wrong kind of value",
+		}
 	case .None:
 		return RESP_Bulk_String{val.value}
 	}
