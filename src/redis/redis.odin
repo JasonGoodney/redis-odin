@@ -406,6 +406,10 @@ xadd :: proc(conn: ^Connection, args: []string) -> RESP {
 	if err != nil {
 		return RESP_Simple_Error{error_string(err)}
 	}
+
+	if entry == nil {
+		return RESP_Null_Bulk_String{}
+	}
 	return RESP_Bulk_String{stream_entry_id_string(entry.id)}
 }
 
