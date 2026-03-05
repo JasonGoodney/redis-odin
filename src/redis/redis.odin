@@ -662,12 +662,21 @@ discard :: proc(client: ^Client, args: []string) -> RESP {
 info :: proc(client: ^Client, args: []string) -> RESP {
 	repl_arg_index := index_string(args, "replication")
 	if repl_arg_index > -1 {
+		rolestr: string
 		switch client.role {
 		case .Master:
-			return RESP_Bulk_String{"role:master"}
+			rolestr = "master"
 		case .Slave:
-			return RESP_Bulk_String{"role:slave"}
+			rolestr = "slave"
 		}
+
+		str := fmt.tprintf(
+			"role:%s\r\nmaster_replid:%s\r\nmaster_repl_offset:%d",
+			rolestr,
+			"8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb",
+			0,
+		)
+		return RESP_Bulk_String{str}
 	}
 
 	return RESP_Null_Bulk_String{}
