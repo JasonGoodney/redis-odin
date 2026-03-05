@@ -12,25 +12,31 @@ import "core:time"
 
 server: Server
 Server :: struct {
-	socket:      net.TCP_Socket,
-	database:    ^Database,
-	connections: [1024]^Connection,
+	socket:   net.TCP_Socket,
+	database: ^Database,
+	clients:  [1024]^Client,
 }
 
-Connection_State :: enum {
+Client_Role :: enum {
+	Master,
+	Slave,
+}
+
+Client_State :: enum {
 	Normal = 0,
 	Transaction,
 }
 
-Connection :: struct {
+Client :: struct {
 	server:       ^Server,
 	socket:       net.TCP_Socket,
+	role:         Client_Role,
 	buffer:       [256]byte,
-	state:        Connection_State,
+	state:        Client_State,
 	transactions: [dynamic]Transaction,
 }
 
-connect :: proc(ip: string, port: int) {
+connect :: proc(ip: string, port: int, role: Client_Role) {
 	local_addr, addr_ok := net.parse_ip4_address(ip)
 	if !addr_ok {
 		fmt.println("Failed to parse IP address")
@@ -52,7 +58,7 @@ connect :: proc(ip: string, port: int) {
 	retry := 1
 	max_retries := 5
 	for {
-		client, _, err_accept := net.accept_tcp(server.socket)
+		client_socket, _, err_accept := net.accept_tcp(server.socket)
 		if err_accept != nil {
 			fmt.println("Failed to accept TCP connection")
 			retry += 1
@@ -61,16 +67,17 @@ connect :: proc(ip: string, port: int) {
 			}
 			continue
 		}
-		conn := server.connections[client]
-		if conn == nil {
-			conn = new(Connection)
-			conn.server = &server
-			conn.socket = client
-			server.connections[client] = conn
+		client := server.clients[client_socket]
+		if client == nil {
+			client = new(Client)
+			client.server = &server
+			client.role = role
+			client.socket = client_socket
+			server.clients[client_socket] = client
 		}
 
-		fmt.printfln("Client connected: [fd=%d]", client)
-		thread.create_and_start_with_poly_data(conn, handle_connection)
+		fmt.printfln("Client connected: [fd=%d]", client_socket)
+		thread.create_and_start_with_poly_data(client, handle_connection)
 	}
 
 	fmt.println("Closing server.")
@@ -78,19 +85,19 @@ connect :: proc(ip: string, port: int) {
 	net.close(server.socket)
 }
 
-handle_connection :: proc(conn: ^Connection) {
+handle_connection :: proc(client: ^Client) {
 	defer {
 		fmt.println("Disconnecting client")
-		server.connections[conn.socket] = nil
-		net.close(conn.socket)
+		server.clients[client.socket] = nil
+		net.close(client.socket)
 	}
 	for {
-		bytes_recv, err_recv := net.recv_tcp(conn.socket, conn.buffer[:])
+		bytes_recv, err_recv := net.recv_tcp(client.socket, client.buffer[:])
 		if err_recv != nil {
 			fmt.println("Failed to receive data", err_recv)
 			break
 		}
-		received := conn.buffer[:bytes_recv]
+		received := client.buffer[:bytes_recv]
 		if len(received) == 0 ||
 		   is_ctrl_d(received) ||
 		   is_empty(received) ||
@@ -122,10 +129,10 @@ handle_connection :: proc(conn: ^Connection) {
 			fmt.printfln("Unsupported command: %s", args[0])
 			break
 		}
-		if conn.state == .Transaction && cmd.name != "EXEC" && cmd.name != "DISCARD" {
-			resp = transaction_queue(conn, args)
+		if client.state == .Transaction && cmd.name != "EXEC" && cmd.name != "DISCARD" {
+			resp = transaction_queue(client, args)
 		} else {
-			resp = cmd.handler(conn, args)
+			resp = cmd.handler(client, args)
 		}
 		response := encode(resp)
 		if response == "" {
@@ -133,7 +140,7 @@ handle_connection :: proc(conn: ^Connection) {
 		}
 
 		buffer := transmute([]u8)response
-		bytes_sent, err_send := net.send_tcp(conn.socket, buffer)
+		bytes_sent, err_send := net.send_tcp(client.socket, buffer)
 		if err_send != nil {
 			fmt.println("Failed to send data")
 		}
@@ -148,7 +155,7 @@ Transaction :: struct {
 	args: []string,
 }
 
-Command_Handler :: proc(conn: ^Connection, args: []string) -> RESP
+Command_Handler :: proc(client: ^Client, args: []string) -> RESP
 Command :: struct {
 	name:      string,
 	min_args:  int,
@@ -206,18 +213,18 @@ check_command_usage :: proc(args: []string) -> (message: string, ok: bool) {
 	return "", true
 }
 
-ping :: proc(conn: ^Connection, args: []string) -> RESP {
+ping :: proc(client: ^Client, args: []string) -> RESP {
 	if len(args) > 1 {
-		return echo(conn, args)
+		return echo(client, args)
 	}
 	return RESP_Simple_String{"PONG"}
 }
 
-echo :: proc(conn: ^Connection, args: []string) -> RESP {
+echo :: proc(client: ^Client, args: []string) -> RESP {
 	return RESP_Bulk_String{args[1]}
 }
 
-set :: proc(conn: ^Connection, args: []string) -> RESP {
+set :: proc(client: ^Client, args: []string) -> RESP {
 	argc := len(args)
 	key := args[1]
 	val := args[2]
@@ -245,7 +252,7 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 		}
 	}
 
-	err := string_set(conn.server.database, key, obj)
+	err := string_set(client.server.database, key, obj)
 	if err != nil {
 		return {}
 	}
@@ -253,9 +260,9 @@ set :: proc(conn: ^Connection, args: []string) -> RESP {
 	return RESP_Simple_String{"OK"}
 }
 
-get :: proc(conn: ^Connection, args: []string) -> RESP {
+get :: proc(client: ^Client, args: []string) -> RESP {
 	key := args[1]
-	val, err := string_get(conn.server.database, key)
+	val, err := string_get(client.server.database, key)
 	switch err {
 	case .Expired:
 		return RESP_Null_Bulk_String{}
@@ -273,30 +280,30 @@ get :: proc(conn: ^Connection, args: []string) -> RESP {
 	return RESP_Null_Bulk_String{}
 }
 
-incr :: proc(conn: ^Connection, args: []string) -> RESP {
-	val, incr_err := string_incr(conn.server.database, args[1])
+incr :: proc(client: ^Client, args: []string) -> RESP {
+	val, incr_err := string_incr(client.server.database, args[1])
 	if incr_err != nil {
 		return RESP_Simple_Error{"ERR value is not an integer or out of range"}
 	}
 	return RESP_Integer{val}
 }
 
-rpush :: proc(conn: ^Connection, args: []string) -> RESP {
-	count, _ := list_push_back(conn.server.database, args[1], ..args[2:])
+rpush :: proc(client: ^Client, args: []string) -> RESP {
+	count, _ := list_push_back(client.server.database, args[1], ..args[2:])
 	return RESP_Integer{count}
 }
 
-lpush :: proc(conn: ^Connection, args: []string) -> RESP {
-	count, _ := list_push_front(conn.server.database, args[1], ..args[2:])
+lpush :: proc(client: ^Client, args: []string) -> RESP {
+	count, _ := list_push_front(client.server.database, args[1], ..args[2:])
 	return RESP_Integer{count}
 }
 
-lrange :: proc(conn: ^Connection, args: []string) -> RESP {
+lrange :: proc(client: ^Client, args: []string) -> RESP {
 	key := args[1]
 	start, start_ok := strconv.parse_i64(args[2])
 	stop, stop_ok := strconv.parse_i64(args[3])
 
-	values, _ := list_range(conn.server.database, key, start, stop)
+	values, _ := list_range(client.server.database, key, start, stop)
 	resp := RESP_Array{}
 	resp.elements = make(type_of(resp.elements))
 	for val in values {
@@ -306,21 +313,21 @@ lrange :: proc(conn: ^Connection, args: []string) -> RESP {
 	return resp
 }
 
-llen :: proc(conn: ^Connection, args: []string) -> RESP {
-	length, _ := list_length(conn.server.database, args[1])
+llen :: proc(client: ^Client, args: []string) -> RESP {
+	length, _ := list_length(client.server.database, args[1])
 	return RESP_Integer{length}
 }
 
-lpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return gen_pop(conn, args, list_pop_front)
+lpop :: proc(client: ^Client, args: []string) -> RESP {
+	return gen_pop(client, args, list_pop_front)
 }
 
-rpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return gen_pop(conn, args, list_pop_back)
+rpop :: proc(client: ^Client, args: []string) -> RESP {
+	return gen_pop(client, args, list_pop_back)
 }
 
 gen_pop :: proc(
-	conn: ^Connection,
+	client: ^Client,
 	args: []string,
 	popper: proc(db: ^Database, key: string, count: int = 1) -> ([]string, Database_Error),
 ) -> RESP {
@@ -333,7 +340,7 @@ gen_pop :: proc(
 		}
 	}
 
-	popped, err := popper(conn.server.database, key, count)
+	popped, err := popper(client.server.database, key, count)
 	if len(popped) == 1 {
 		return RESP_Bulk_String{popped[0]}
 	} else {
@@ -345,16 +352,16 @@ gen_pop :: proc(
 	}
 }
 
-blpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return bpop(conn, args, list_pop_front)
+blpop :: proc(client: ^Client, args: []string) -> RESP {
+	return bpop(client, args, list_pop_front)
 }
 
-brpop :: proc(conn: ^Connection, args: []string) -> RESP {
-	return bpop(conn, args, list_pop_back)
+brpop :: proc(client: ^Client, args: []string) -> RESP {
+	return bpop(client, args, list_pop_back)
 }
 
 bpop :: proc(
-	conn: ^Connection,
+	client: ^Client,
 	args: []string,
 	popper: proc(db: ^Database, key: string, count: int = 1) -> ([]string, Database_Error),
 ) -> RESP {
@@ -370,9 +377,9 @@ bpop :: proc(
 			break
 		}
 
-		list, _ := list_get(conn.server.database, key)
+		list, _ := list_get(client.server.database, key)
 		if list.len > 0 {
-			popped, ok := popper(conn.server.database, key, 1)
+			popped, ok := popper(client.server.database, key, 1)
 			resp := RESP_Array{}
 			append(&resp.elements, RESP_Bulk_String{key})
 			append(&resp.elements, RESP_Bulk_String{popped[0]})
@@ -385,8 +392,8 @@ bpop :: proc(
 	return RESP_Null_Array{}
 }
 
-type :: proc(conn: ^Connection, args: []string) -> RESP {
-	type, err := generic_type(conn.server.database, args[1])
+type :: proc(client: ^Client, args: []string) -> RESP {
+	type, err := generic_type(client.server.database, args[1])
 	if err != nil {
 		return RESP_Simple_String{"none"}
 	}
@@ -394,7 +401,7 @@ type :: proc(conn: ^Connection, args: []string) -> RESP {
 	return RESP_Simple_String{type}
 }
 
-xadd :: proc(conn: ^Connection, args: []string) -> RESP {
+xadd :: proc(client: ^Client, args: []string) -> RESP {
 	field_args := args[3:][:]
 	fields := make(map[string]string)
 	for i := 1; i < len(field_args); i += 2 {
@@ -403,7 +410,7 @@ xadd :: proc(conn: ^Connection, args: []string) -> RESP {
 		fields[key] = val
 	}
 
-	entry, err := stream_add(conn.server.database, args[1], args[2], fields)
+	entry, err := stream_add(client.server.database, args[1], args[2], fields)
 	if err != nil {
 		return RESP_Simple_Error{error_string(err)}
 	}
@@ -414,8 +421,8 @@ xadd :: proc(conn: ^Connection, args: []string) -> RESP {
 	return RESP_Bulk_String{stream_entry_id_string(entry.id)}
 }
 
-xrange :: proc(conn: ^Connection, args: []string) -> RESP {
-	entries, err := stream_range(conn.server.database, args[1], args[2], args[3])
+xrange :: proc(client: ^Client, args: []string) -> RESP {
+	entries, err := stream_range(client.server.database, args[1], args[2], args[3])
 	if err != nil {
 		return RESP_Null_Array{}
 	}
@@ -459,7 +466,7 @@ maybe_id :: proc(s: string) -> bool {
 	return false
 }
 
-xread :: proc(conn: ^Connection, args: []string) -> RESP {
+xread :: proc(client: ^Client, args: []string) -> RESP {
 	block_index := 0
 	block_found := false
 	for arg in args {
@@ -495,7 +502,7 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 
 	for i := 0; i < len(args) - ids_index; i += 1 {
 		if 0 == strings.compare(args[ids_index], "$") {
-			top, top_err := stream_top(conn.server.database, args[streams_index + i])
+			top, top_err := stream_top(client.server.database, args[streams_index + i])
 			if top != nil {
 				args[ids_index + i] = stream_entry_id_string(top.id)
 			} else {
@@ -530,9 +537,14 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 			}
 
 			if streams_count > 1 {
-				_xread_stream_multi(conn, args[streams_index:ids_index], args[ids_index:], &result)
+				_xread_stream_multi(
+					client,
+					args[streams_index:ids_index],
+					args[ids_index:],
+					&result,
+				)
 			} else {
-				_xread_stream_single(conn, args[streams_index], args[ids_index], &result)
+				_xread_stream_single(client, args[streams_index], args[ids_index], &result)
 			}
 
 			if len(result.elements) > 0 {
@@ -543,9 +555,9 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 		}
 	} else {
 		if streams_count > 1 {
-			_xread_stream_multi(conn, args[streams_index:ids_index], args[ids_index:], &result)
+			_xread_stream_multi(client, args[streams_index:ids_index], args[ids_index:], &result)
 		} else {
-			_xread_stream_single(conn, args[streams_index], args[ids_index], &result)
+			_xread_stream_single(client, args[streams_index], args[ids_index], &result)
 		}
 
 	}
@@ -558,22 +570,22 @@ xread :: proc(conn: ^Connection, args: []string) -> RESP {
 }
 
 _xread_stream_multi :: proc(
-	conn: ^Connection,
+	client: ^Client,
 	streams: []string,
 	ids: []string,
 	parent: ^RESP_Array,
 ) {
 	for i := 0; i < len(streams); i += 1 {
-		_xread_stream_single(conn, streams[i], ids[i], parent)
+		_xread_stream_single(client, streams[i], ids[i], parent)
 	}
 }
 
-_xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, parent: ^RESP_Array) {
+_xread_stream_single :: proc(client: ^Client, stream: string, id: string, parent: ^RESP_Array) {
 	stream_arr := RESP_Array{}
 	stream_arr.elements = make(type_of(stream_arr.elements))
 	append(&stream_arr.elements, RESP_Bulk_String{stream})
 
-	entries, err := stream_read(conn.server.database, stream, id)
+	entries, err := stream_read(client.server.database, stream, id)
 
 	if err != nil {
 		fmt.printfln("xread failed with error: %v", err)
@@ -608,49 +620,54 @@ _xread_stream_single :: proc(conn: ^Connection, stream: string, id: string, pare
 	append(&parent.elements, stream_arr)
 }
 
-multi :: proc(conn: ^Connection, args: []string) -> RESP {
-	conn.transactions = make(type_of(conn.transactions))
-	conn.state = .Transaction
+multi :: proc(client: ^Client, args: []string) -> RESP {
+	client.transactions = make(type_of(client.transactions))
+	client.state = .Transaction
 	return RESP_Simple_String{"OK"}
 }
 
-transaction_queue :: proc(conn: ^Connection, args: []string) -> RESP {
+transaction_queue :: proc(client: ^Client, args: []string) -> RESP {
 	cmd := get_command(args[0])
-	append(&conn.transactions, Transaction{cmd, args})
+	append(&client.transactions, Transaction{cmd, args})
 	return RESP_Simple_String{"QUEUED"}
 }
 
-exec :: proc(conn: ^Connection, args: []string) -> RESP {
-	if conn.state == .Normal {
+exec :: proc(client: ^Client, args: []string) -> RESP {
+	if client.state == .Normal {
 		return RESP_Simple_Error{"ERR EXEC without MULTI"}
 	}
 
 	resp: RESP_Array
 	resp.elements = make(type_of(resp.elements))
-	for trans in conn.transactions {
-		r := trans.cmd.handler(conn, trans.args)
+	for trans in client.transactions {
+		r := trans.cmd.handler(client, trans.args)
 		append(&resp.elements, r)
 	}
 
-	delete(conn.transactions)
-	conn.state = .Normal
+	delete(client.transactions)
+	client.state = .Normal
 	return resp
 }
 
-discard :: proc(conn: ^Connection, args: []string) -> RESP {
-	if conn.state == .Normal {
+discard :: proc(client: ^Client, args: []string) -> RESP {
+	if client.state == .Normal {
 		return RESP_Simple_Error{"ERR DISCARD without MULTI"}
 	}
 
-	clear(&conn.transactions)
-	conn.state = .Normal
+	clear(&client.transactions)
+	client.state = .Normal
 	return RESP_Simple_String{"OK"}
 }
 
-info :: proc(conn: ^Connection, args: []string) -> RESP {
+info :: proc(client: ^Client, args: []string) -> RESP {
 	repl_arg_index := index_string(args, "replication")
 	if repl_arg_index > -1 {
-		return RESP_Bulk_String{"role:master"}
+		switch client.role {
+		case .Master:
+			return RESP_Bulk_String{"role:master"}
+		case .Slave:
+			return RESP_Bulk_String{"role:slave"}
+		}
 	}
 
 	return RESP_Null_Bulk_String{}
